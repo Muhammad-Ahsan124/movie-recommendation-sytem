@@ -1,49 +1,27 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Matrix Factorization Movie Recommender (TensorFlow.js)</title>
-  <link rel="stylesheet" href="style.css" />
-</head>
-<body>
-  <main class="card">
-    <h1>Matrix Factorization Movie Recommender</h1>
-
-    <div class="controls">
-      <label for="user-select">Select User</label>
-      <select id="user-select"></select>
-
-      <label for="movie-select">Select Movie</label>
-      <select id="movie-select"></select>
-
-      <button id="predict-btn" onclick="predictRating()">Predict Rating</button>
+<main>
+  <div class="search-container">
+    <div class="search-box">
+      <svg class="search-icon" viewBox="0 0 24 24">
+        <path fill="currentColor" d="M15.5 14h-.79l-.28-.27A6.471 
+        6.471 0 0016 9.5 6.5 6.5 0 109.5 
+        16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79L20 
+        20.49 21.49 19 15.5 14zM4 9.5C4 
+        6.46 6.46 4 9.5 4S15 6.46 15 
+        9.5 12.54 15 9.5 15 4 12.54 
+        4 9.5z"/>
+      </svg>
+      <input 
+        type="text" 
+        id="search-input" 
+        placeholder="Search for movies, titles, genres..."
+        oninput="handleSearch(event)"
+      />
     </div>
+    <div id="search-results" class="search-results"></div>
+  </div>
 
-    <div id="result" class="result">Loading data...</div>
+  <button id="predict-btn" onclick="predictRating()" disabled>Predict Rating</button>
 
-    <details class="info">
-      <summary>About</summary>
-      <p>
-        This demo loads the MovieLens 100K dataset (u.item and u.data),
-        trains a matrix factorization model (user &amp; item embeddings)
-        in your browser with TensorFlow.js, and predicts a user's rating
-        for any movie from the dataset.
-      </p>
-    </details>
-
-    <footer class="footer">
-      <small>Built with TensorFlow.js • Runs entirely in browser</small>
-    </footer>
-  </main>
-
-  <!-- TensorFlow.js (must be loaded first) -->
-  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
-
-  <!-- Data loader and parser -->
-  <script src="data.js"></script>
-
-  <!-- Model, training, and UI logic -->
-  <script src="script.js"></script>
-</body>
-</html>
+  <div id="status" class="status">Loading data and training model...</div>
+  <div id="result" class="result"></div>
+</main>
