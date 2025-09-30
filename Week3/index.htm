@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Matrix Factorization Movie Recommender (TensorFlow.js)</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main class="card">
+    <h1>Matrix Factorization Movie Recommender</h1>
+
+    <div class="controls">
+      <label for="user-select">Select User</label>
+      <select id="user-select"></select>
+
+      <label for="movie-select">Select Movie</label>
+      <select id="movie-select"></select>
+
+      <button id="predict-btn" onclick="predictRating()">Predict Rating</button>
+    </div>
+
+    <div id="result" class="result">Loading data...</div>
+
+    <details class="info">
+      <summary>About</summary>
+      <p>
+        This demo loads the MovieLens 100K dataset (u.item and u.data),
+        trains a matrix factorization model (user &amp; item embeddings)
+        in your browser with TensorFlow.js, and predicts a user's rating
+        for any movie from the dataset.
+      </p>
+    </details>
+
+    <footer class="footer">
+      <small>Built with TensorFlow.js • Runs entirely in browser</small>
+    </footer>
+  </main>
+
+  <!-- TensorFlow.js (must be loaded first) -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
+
+  <!-- Data loader and parser -->
+  <script src="data.js"></script>
+
+  <!-- Model, training, and UI logic -->
+  <script src="script.js"></script>
+</body>
+</html>
