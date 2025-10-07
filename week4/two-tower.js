@@ -1,296 +1,215 @@
 // two-tower.js
-// Implements TwoTowerModel (embedding tables + in-batch softmax/BPR training) and DeepRecModel (embeddings + MLP taking optional genre and user features).
+// Two-Tower model core for TF.js
+// Implements embedding tables, optional MLP for item tower, scoring, and training step.
+// Comments above blocks explain design decisions.
+
+// TwoTowerModel class encapsulates parameters and operations.
+// - userEmbedding: variable [numUsers, embDim]
+// - itemEmbedding: variable [numItems, embDim]
+// - optional item MLP: to incorporate item genre features (concat with embedding and pass through dense layers)
+// - scoring: dot product between userEmb and itemEmb (or processed item features)
+// - training supports two losses: in-batch softmax (sampled softmax using batch items as negatives) and BPR.
 
 class TwoTowerModel {
-  constructor(numUsers, numItems, embDim=32) {
-    this.numUsers = numUsers;
-    this.numItems = numItems;
-    this.embDim = embDim;
-
-    // Use unique variable names with timestamp to prevent conflicts
-    const timestamp = Date.now();
-    this.userEmbed = tf.variable(tf.randomNormal([numUsers, embDim], 0, 0.05), true, `userEmbed_${timestamp}`);
-    this.itemEmbed = tf.variable(tf.randomNormal([numItems, embDim], 0, 0.05), true, `itemEmbed_${timestamp}`);
-  }
-
-  userEmbedLookup(uIdxArr) {
-    return tf.tidy(() => {
-      const ids = tf.tensor1d(uIdxArr, 'int32');
-      return tf.gather(this.userEmbed, ids);
-    });
-  }
-  itemEmbedLookup(iIdxArr) {
-    return tf.tidy(() => {
-      const ids = tf.tensor1d(iIdxArr, 'int32');
-      return tf.gather(this.itemEmbed, ids);
-    });
-  }
-
-  async trainStepInBatch(uIdxArr, posIdxArr, optimizer, useBPR=false) {
-    const varList = [this.userEmbed, this.itemEmbed];
-    const lossScalar = await optimizer.minimize(() => {
-      return tf.tidy(() => {
-        const U = this.userEmbedLookup(uIdxArr);
-        const P = this.itemEmbedLookup(posIdxArr);
-        const logits = tf.matMul(U, P, false, true);
-        if (!useBPR) {
-          const B = uIdxArr.length;
-          const labels = tf.oneHot(tf.range(0, B, 1, 'int32'), B);
-          const losses = tf.losses.softmaxCrossEntropy(labels, logits, undefined, 'none');
-          return losses.mean();
-        } else {
-          const B = uIdxArr.length;
-          const negIdxArr = posIdxArr.map((_,i) => posIdxArr[(i+1)%B]);
-          const N = this.itemEmbedLookup(negIdxArr);
-          const sPos = tf.sum(tf.mul(U, P), 1);
-          const sNeg = tf.sum(tf.mul(U, N), 1);
-          const diff = sPos.sub(sNeg);
-          const loss = tf.neg(tf.log(tf.sigmoid(diff).add(1e-9))).mean();
-          return loss;
-        }
-      });
-    }, true, varList);
-
-    const val = (await lossScalar.data())[0];
-    lossScalar.dispose();
-    return val;
-  }
-
-  async getItemEmbeddings(indexArr) {
-    return tf.tidy(() => this.itemEmbedLookup(indexArr));
-  }
-
-  async getUserEmbedding(uIdx) {
-    return tf.tidy(() => this.userEmbed.gather(tf.tensor1d([uIdx], 'int32')).squeeze());
-  }
-
-  async scoreAllItems(userEmbTensor) {
-    return tf.tidy(() => {
-      let u = userEmbTensor;
-      if (u.rank === 1) u = u.expandDims(0);
-      const s = tf.matMul(u, this.itemEmbed, false, true).squeeze();
-      return s;
-    });
-  }
-
-  dispose() {
-    if (this.userEmbed) {
-      this.userEmbed.dispose();
-    }
-    if (this.itemEmbed) {
-      this.itemEmbed.dispose();
-    }
-  }
-}
-
-class DeepRecModel {
   constructor(config) {
     this.numUsers = config.numUsers;
     this.numItems = config.numItems;
     this.embDim = config.embDim || 32;
-    this.useGenres = !!config.useGenres;
-    this.useUserFeat = !!config.useUserFeat;
-    this.userFeatArray = config.userFeatArray || null;
-    this.itemGenresArray = config.itemGenresArray || null;
-    this.genreDim = config.genreDim || 0;
+    this.useMLP = !!config.useMLP;
+    this.mlpHidden = config.mlpHidden || 64;
+    this.lr = config.lr || 0.001;
+    this.lossType = config.lossType || 'inbatch'; // 'inbatch' or 'bpr'
+    this.optimizer = tf.train.adam(this.lr);
 
-    // Use unique variable names with timestamp to prevent conflicts
-    const timestamp = Date.now();
-    this.userEmbed = tf.variable(tf.randomNormal([this.numUsers, this.embDim], 0, 0.05), true, `dl_userEmbed_${timestamp}`);
-    this.itemEmbed = tf.variable(tf.randomNormal([this.numItems, this.embDim], 0, 0.05), true, `dl_itemEmbed_${timestamp}`);
+    // Initialize embeddings: small random normal
+    this.userEmb = tf.variable(tf.randomNormal([this.numUsers, this.embDim], 0, 0.05), true, 'userEmb');
+    this.itemEmb = tf.variable(tf.randomNormal([this.numItems, this.embDim], 0, 0.05), true, 'itemEmb');
 
-    this.userFeatDim = (this.useUserFeat && this.userFeatArray && this.userFeatArray.length>0) ? this.userFeatArray[0].length : 0;
+    // Optional biases
+    this.userBias = tf.variable(tf.zeros([this.numUsers, 1]), true, 'userBias');
+    this.itemBias = tf.variable(tf.zeros([this.numItems, 1]), true, 'itemBias');
 
-    // Input dimension calculation: user_emb + item_emb + genres + user_features
-    this.inputDim = this.embDim + this.embDim + (this.useGenres ? this.genreDim : 0) + (this.useUserFeat ? this.userFeatDim : 0);
-    
-    // MLP layers with unique names - FIXED: Create proper layer variables
-    this.dense1Weights = tf.variable(
-      tf.randomNormal([this.inputDim, Math.max(64, this.inputDim)], 0, 0.05), 
-      true, 
-      `dense1_weights_${timestamp}`
-    );
-    this.dense1Bias = tf.variable(
-      tf.zeros([Math.max(64, this.inputDim)]), 
-      true, 
-      `dense1_bias_${timestamp}`
-    );
-    
-    this.dense2Weights = tf.variable(
-      tf.randomNormal([Math.max(64, this.inputDim), 32], 0, 0.05), 
-      true, 
-      `dense2_weights_${timestamp}`
-    );
-    this.dense2Bias = tf.variable(
-      tf.zeros([32]), 
-      true, 
-      `dense2_bias_${timestamp}`
-    );
-    
-    this.outWeights = tf.variable(
-      tf.randomNormal([32, 1], 0, 0.05), 
-      true, 
-      `out_weights_${timestamp}`
-    );
-    this.outBias = tf.variable(
-      tf.zeros([1]), 
-      true, 
-      `out_bias_${timestamp}`
-    );
-  }
-
-  userEmbedLookup(uIdxArr) {
-    return tf.tidy(() => tf.gather(this.userEmbed, tf.tensor1d(uIdxArr,'int32')));
-  }
-  itemEmbedLookup(iIdxArr) {
-    return tf.tidy(() => tf.gather(this.itemEmbed, tf.tensor1d(iIdxArr,'int32')));
-  }
-
-  itemGenreLookup(iIdxArr) {
-    if (!this.useGenres || !this.itemGenresArray || this.genreDim===0) {
-      return tf.zeros([iIdxArr.length, 0]);
+    // MLP for item features (genres). We'll create weights if useMLP true.
+    if (this.useMLP) {
+      // input: embDim + genreDim -> hidden -> output embDim (project back to embDim)
+      // We'll create simple dense layers with variables
+      this.genreDim = config.genreDim || 19;
+      const inDim = this.embDim + this.genreDim;
+      this.W1 = tf.variable(tf.randomNormal([inDim, this.mlpHidden], 0, 0.05));
+      this.b1 = tf.variable(tf.zeros([this.mlpHidden]));
+      this.W2 = tf.variable(tf.randomNormal([this.mlpHidden, this.embDim], 0, 0.05));
+      this.b2 = tf.variable(tf.zeros([this.embDim]));
     }
-    const arr = iIdxArr.map(i => {
-      return this.itemGenresArray[i] || new Array(this.genreDim).fill(0);
-    });
-    return tf.tensor2d(arr, [arr.length, this.genreDim]);
   }
 
-  userFeatureLookup(uIdxArr) {
-    if (!this.useUserFeat || !this.userFeatArray) return tf.zeros([uIdxArr.length, 0]);
-    const arr = uIdxArr.map(u => this.userFeatArray[u] || new Array(this.userFeatDim).fill(0));
-    return tf.tensor2d(arr, [arr.length, this.userFeatDim]);
+  // Gather user embeddings for indices tensor shape [batch,1] or [batch]
+  userForward(userIdx) {
+    // userIdx: int32 tensor shape [batch] or [batch,1]
+    const idx = userIdx.reshape([-1]).toInt();
+    return tf.gather(this.userEmb, idx); // shape [batch, embDim]
   }
 
-  // FIXED: Proper MLP forward pass with manual layers
-  mlpForward(input) {
-    return tf.tidy(() => {
-      const h1 = tf.relu(tf.add(tf.matMul(input, this.dense1Weights), this.dense1Bias));
-      const h2 = tf.relu(tf.add(tf.matMul(h1, this.dense2Weights), this.dense2Bias));
-      const out = tf.add(tf.matMul(h2, this.outWeights), this.outBias);
-      return out;
-    });
+  // Gather item embeddings (base) and optionally process with MLP using genre features
+  // itemIdx: [batch] int tensor. genreFeat: optional float tensor [batch, genreDim]
+  itemForward(itemIdx, genreFeat = null) {
+    const idx = itemIdx.reshape([-1]).toInt();
+    let emb = tf.gather(this.itemEmb, idx); // [batch, embDim]
+    if (this.useMLP && genreFeat) {
+      // concatenate embedding and genres
+      const concat = tf.concat([emb, genreFeat], 1); // [batch, embDim+genreDim]
+      const h = tf.relu(tf.add(tf.matMul(concat, this.W1), this.b1)); // [batch, mlpHidden]
+      const out = tf.add(tf.matMul(h, this.W2), this.b2); // [batch, embDim]
+      emb.dispose();
+      return out; // [batch, embDim]
+    } else {
+      return emb;
+    }
   }
 
-  async trainStep(uIdxArr, posIdxArr, optimizer, useBPR=false) {
-    // FIXED: Collect all trainable variables properly
-    const trainableVars = [
-      this.userEmbed, 
-      this.itemEmbed,
-      this.dense1Weights,
-      this.dense1Bias,
-      this.dense2Weights, 
-      this.dense2Bias,
-      this.outWeights,
-      this.outBias
-    ];
-
-    const that = this;
-    const lossScalar = await optimizer.minimize(() => {
-      return tf.tidy(() => {
-        const B = uIdxArr.length;
-        const Uembed = that.userEmbedLookup(uIdxArr);        // [B, embDim]
-        const Pembed = that.itemEmbedLookup(posIdxArr);      // [B, embDim]
-        const genreTensor = that.itemGenreLookup(posIdxArr); // [B, genreDim]
-        const userFeatTensor = that.userFeatureLookup(uIdxArr); // [B, userFeatDim]
-
-        // Build MLP input by concatenating all features
-        const inputParts = [Uembed, Pembed];
-        if (that.useGenres && that.genreDim > 0) inputParts.push(genreTensor);
-        if (that.useUserFeat && that.userFeatDim > 0) inputParts.push(userFeatTensor);
-        
-        const input = tf.concat(inputParts, 1); // [B, inputDim]
-
-        // Forward pass through MLP
-        const mlpOut = that.mlpForward(input).reshape([B]); // [B]
-
-        if (!useBPR) {
-          // In-batch softmax loss
-          const logits = tf.matMul(Uembed, Pembed, false, true); // [B, B]
-          const labels = tf.oneHot(tf.range(0, B, 1, 'int32'), B);
-          const losses = tf.losses.softmaxCrossEntropy(labels, logits, undefined, 'none');
-          return losses.mean();
-        } else {
-          // BPR pairwise loss
-          const negIdxArr = posIdxArr.map((_,i) => posIdxArr[(i+1)%B]);
-          const Nembed = that.itemEmbedLookup(negIdxArr);
-          const sPos = tf.sum(tf.mul(Uembed, Pembed), 1);
-          const sNeg = tf.sum(tf.mul(Uembed, Nembed), 1);
-          const diff = sPos.sub(sNeg);
-          const loss = tf.neg(tf.log(tf.sigmoid(diff).add(1e-9))).mean();
-          return loss;
-        }
-      });
-    }, true, trainableVars);
-
-    const val = (await lossScalar.data())[0];
-    lossScalar.dispose();
-    return val;
+  // Compute dot scores between userEmb [batch,embDim] and itemEmb [batch,embDim] or itemEmbedding matrix
+  // If itemEmbMatrix provided [numItems, embDim], result [batch, numItems]; otherwise dot per row -> [batch,1]
+  scorePairwise(userEmb, itemEmb) {
+    // userEmb [batch, d], itemEmb [batch, d] -> elementwise dot and sum -> [batch,1]
+    const prod = tf.mul(userEmb, itemEmb);
+    const s = tf.sum(prod, 1).reshape([-1, 1]); // [batch,1]
+    prod.dispose();
+    return s;
   }
 
-  async getUserEmbedding(uIdx) {
-    return tf.tidy(() => this.userEmbed.gather(tf.tensor1d([uIdx], 'int32')).squeeze());
+  // Compute batch logits U @ I^T (for in-batch softmax negatives)
+  // userEmb [B, d], itemEmbBatch [B, d] -> logits [B, B]
+  batchLogits(userEmb, itemEmbBatch) {
+    return tf.matMul(userEmb, itemEmbBatch, false, true); // [B, B]
   }
 
-  async scoreAllItems(userEmbTensor) {
-    return tf.tidy(() => {
-      let u = userEmbTensor;
-      if (u.rank === 1) u = u.expandDims(0); // [1, embDim]
-      
-      const itemEmbMatrix = this.itemEmbed; // [numItems, embDim]
-      
-      // Dot product scores (baseline two-tower)
-      const dotScores = tf.matMul(u, itemEmbMatrix, false, true).squeeze(); // [numItems]
+  // Compute user bias and item bias lookups
+  userBiasLookup(userIdx) {
+    const idx = userIdx.reshape([-1]).toInt();
+    return tf.gather(this.userBias, idx).reshape([-1,1]); // [B,1]
+  }
+  itemBiasLookup(itemIdx) {
+    const idx = itemIdx.reshape([-1]).toInt();
+    return tf.gather(this.itemBias, idx).reshape([-1,1]); // [B,1]
+  }
 
-      // MLP-enhanced scores if using additional features
-      if ((this.useGenres && this.genreDim > 0) || (this.useUserFeat && this.userFeatDim > 0)) {
-        // Prepare repeated user embedding for all items
-        const uRepeated = u.tile([this.numItems, 1]); // [numItems, embDim]
-        
-        // Prepare genre features for all items
-        let genreMat = tf.zeros([this.numItems, 0]);
-        if (this.useGenres && this.genreDim > 0 && this.itemGenresArray) {
-          genreMat = tf.tensor2d(this.itemGenresArray, [this.numItems, this.genreDim]);
-        }
-        
-        // Prepare user features repeated for all items  
-        let userFeatMat = tf.zeros([this.numItems, 0]);
-        if (this.useUserFeat && this.userFeatDim > 0 && this.userFeatArray) {
-          // For scoring, we use the features of the single user repeated for all items
-          const singleUserFeat = this.userFeatArray[0] || new Array(this.userFeatDim).fill(0);
-          userFeatMat = tf.tile(tf.tensor2d([singleUserFeat], [1, this.userFeatDim]), [this.numItems, 1]);
-        }
+  // Single training step: accepts batch tensors (userIdx [B], posItemIdx [B], genreFeatPos [B,gd])
+  // If lossType=='inbatch' will compute logits = U@I^T + biases and compute softmax crossentropy with labels = diagonal
+  // If lossType=='bpr' will sample negative items idxNeg [B] and compute BPR loss
+  async trainStep(batch, extra) {
+    // batch: {userIdx: Int32Array, posIdx: Int32Array, negIdx?: Int32Array}
+    // extra: {genrePos?: Float32Array2D, genreNeg?: Float32Array2D, itemEmbAll?: tf.Tensor}
+    const { userIdx, posIdx, negIdx } = batch;
+    const B = userIdx.length;
+    const userT = tf.tensor1d(userIdx, 'int32');
+    const posT = tf.tensor1d(posIdx, 'int32');
 
-        // Build MLP input
-        const inputParts = [uRepeated, itemEmbMatrix];
-        if (this.useGenres && this.genreDim > 0) inputParts.push(genreMat);
-        if (this.useUserFeat && this.userFeatDim > 0) inputParts.push(userFeatMat);
-        
-        const input = tf.concat(inputParts, 1); // [numItems, inputDim]
+    // convert genre features if provided
+    const genrePosT = extra && extra.genrePos ? tf.tensor2d(extra.genrePos, [B, extra.genreDim]) : null;
+    const genreNegT = extra && extra.genreNeg ? (negIdx ? tf.tensor2d(extra.genreNeg, [B, extra.genreDim]) : null) : null;
 
-        // MLP forward pass
-        const mlpScores = this.mlpForward(input).reshape([this.numItems]); // [numItems]
+    const self = this;
+    const lossScalar = await this.optimizer.minimize(() => {
+      // Forward pass
+      const uEmb = self.userForward(userT);      // [B, d]
+      const iPosEmb = self.itemForward(posT, genrePosT); // [B, d]
+      const uBias = self.userBiasLookup(userT); // [B,1]
+      const iPosBias = self.itemBiasLookup(posT); // [B,1]
 
-        // Combine dot product and MLP scores
-        const combined = dotScores.add(mlpScores);
-        return combined;
+      if (self.lossType === 'inbatch') {
+        // logits [B,B] = U @ I_pos^T + uBias + iBias^T
+        const logits = self.batchLogits(uEmb, iPosEmb); // [B,B]
+        // Add biases: uBias broadcast + iPosBias transposed
+        const uBiasMat = tf.add(logits, uBias); // broadcasts [B,1] -> [B,B]
+        const iBiasRow = iPosBias.transpose(); // [1,B]
+        const logitsWithBias = tf.add(uBiasMat, iBiasRow); // [B,B]
+
+        // labels: identity matrix (each example's positive is diagonal)
+        // For tf.losses.softmaxCrossEntropy we provide oneHot labels of shape [B,B]
+        const labels = tf.oneHot(tf.range(0, B, 1, 'int32'), B); // [B,B]
+        const soft = tf.losses.softmaxCrossEntropy(labels, logitsWithBias);
+        // cleanup
+        labels.dispose();
+        uBiasMat.dispose();
+        iBiasRow.dispose();
+        logitsWithBias.dispose();
+        logits.dispose();
+
+        // free embeddings/biases
+        uEmb.dispose(); iPosEmb.dispose(); uBias.dispose(); iPosBias.dispose();
+        return soft;
       } else {
-        // Just use dot product scores
-        return dotScores;
+        // BPR-style: need negative samples
+        if (!negIdx || negIdx.length !== B) {
+          // fallback: sample random negatives inside loss (not ideal) - here we pick random ints
+          // but we prefer passing negIdx in batch
+          console.warn('BPR requested but no negIdx provided; sampling random negatives.');
+        }
+        const negT = negIdx ? tf.tensor1d(negIdx, 'int32') : tf.randomUniform([B], 0, self.numItems, 'int32');
+        const iNegEmb = self.itemForward(negT, genreNegT); // [B,d]
+        const iNegBias = self.itemBiasLookup(negT); // [B,1]
+
+        const posScores = tf.add(self.scorePairwise(uEmb, iPosEmb), tf.add(uBias, iPosBias)); // [B,1]
+        const negScores = tf.add(self.scorePairwise(uEmb, iNegEmb), tf.add(uBias, iNegBias));     // [B,1]
+
+        // BPR loss = -log(sigmoid(pos - neg))
+        const x = tf.sub(posScores, negScores);
+        const losses = tf.neg(tf.log(tf.sigmoid(x).add(1e-8)));
+        const meanLoss = tf.mean(losses);
+
+        // cleanup
+        uEmb.dispose(); iPosEmb.dispose(); uNegEmb = null;
+        iNegEmb.dispose(); posScores.dispose(); negScores.dispose();
+        uBias.dispose(); iPosBias.dispose(); iNegBias.dispose();
+        negT.dispose();
+        return meanLoss;
       }
-    });
+    }, true);
+
+    // dispose temp tensors
+    userT.dispose(); posT.dispose();
+    if (genrePosT) genrePosT.dispose();
+    if (genreNegT) genreNegT.dispose();
+
+    const lossVal = lossScalar.dataSync ? lossScalar.dataSync()[0] : (await lossScalar.data())[0];
+    lossScalar.dispose();
+    return lossVal;
   }
 
-  dispose() {
-    const vars = [
-      this.userEmbed, this.itemEmbed,
-      this.dense1Weights, this.dense1Bias,
-      this.dense2Weights, this.dense2Bias,
-      this.outWeights, this.outBias
-    ];
-    
-    vars.forEach(v => {
-      if (v) v.dispose();
-    });
+  // Utility: compute scores vs all items for a given user embedding (batched to limit memory)
+  // uIdx: integer index single user or array. returns JS Float32Array scores length numItems (may be streamed)
+  async scoresForUserIndex(uIdx, genreMatrixAll=null, batchSize=1024) {
+    // get user embedding
+    const uIdxT = tf.tensor1d([uIdx],'int32');
+    const uEmb = this.userForward(uIdxT); // [1,d]
+    uIdxT.dispose();
+
+    // We'll compute dot with itemEmb or itemEmb processed via MLP + optional genre features
+    // For memory, do in batches over items
+    const N = this.numItems;
+    const scores = new Float32Array(N);
+    for (let start=0; start<N; start+=batchSize) {
+      const end = Math.min(N, start+batchSize);
+      const idx = tf.tensor1d(Array.from({length:end-start}, (_,i)=>i+start),'int32');
+      let itemPart = tf.gather(this.itemEmb, idx); // [b,d]
+      if (this.useMLP && genreMatrixAll) {
+        const genreSlice = tf.tensor2d(genreMatrixAll.slice(start, end)); // expects array of arrays
+        const concat = tf.concat([itemPart, genreSlice],1);
+        const h = tf.relu(tf.add(tf.matMul(concat, this.W1), this.b1));
+        const out = tf.add(tf.matMul(h, this.W2), this.b2); // [b,d]
+        itemPart.dispose();
+        concat.dispose(); h.dispose();
+        itemPart = out;
+        genreSlice.dispose();
+      }
+      // dot: uEmb [1,d] x itemPart [b,d]^T => [1,b]
+      const logits = tf.matMul(uEmb, itemPart, false, true); // [1,b]
+      const biasSlice = tf.gather(this.itemBias, idx).reshape([1, end-start]); // [1,b]
+      const withBias = tf.add(logits, biasSlice);
+      const arr = await withBias.data();
+      for (let i=0;i<arr.length;i++) scores[start+i]=arr[i];
+      idx.dispose(); itemPart.dispose(); logits.dispose(); biasSlice.dispose(); withBias.dispose();
+    }
+    uEmb.dispose();
+    return scores;
   }
 }
