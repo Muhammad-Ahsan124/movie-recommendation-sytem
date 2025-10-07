@@ -7,8 +7,10 @@ class TwoTowerModel {
     this.numItems = numItems;
     this.embDim = embDim;
 
-    this.userEmbed = tf.variable(tf.randomNormal([numUsers, embDim], 0, 0.05), true, 'userEmbed');
-    this.itemEmbed = tf.variable(tf.randomNormal([numItems, embDim], 0, 0.05), true, 'itemEmbed');
+    // Use unique variable names with timestamp to prevent conflicts
+    const timestamp = Date.now();
+    this.userEmbed = tf.variable(tf.randomNormal([numUsers, embDim], 0, 0.05), true, `userEmbed_${timestamp}`);
+    this.itemEmbed = tf.variable(tf.randomNormal([numItems, embDim], 0, 0.05), true, `itemEmbed_${timestamp}`);
   }
 
   userEmbedLookup(uIdxArr) {
@@ -70,6 +72,15 @@ class TwoTowerModel {
       return s;
     });
   }
+
+  dispose() {
+    if (this.userEmbed) {
+      this.userEmbed.dispose();
+    }
+    if (this.itemEmbed) {
+      this.itemEmbed.dispose();
+    }
+  }
 }
 
 class DeepRecModel {
@@ -83,18 +94,35 @@ class DeepRecModel {
     this.itemGenresArray = config.itemGenresArray || null;
     this.genreDim = config.genreDim || 0;
 
-    this.userEmbed = tf.variable(tf.randomNormal([this.numUsers, this.embDim], 0, 0.05), true, 'dl_userEmbed');
-    this.itemEmbed = tf.variable(tf.randomNormal([this.numItems, this.embDim], 0, 0.05), true, 'dl_itemEmbed');
+    // Use unique variable names with timestamp to prevent conflicts
+    const timestamp = Date.now();
+    this.userEmbed = tf.variable(tf.randomNormal([this.numUsers, this.embDim], 0, 0.05), true, `dl_userEmbed_${timestamp}`);
+    this.itemEmbed = tf.variable(tf.randomNormal([this.numItems, this.embDim], 0, 0.05), true, `dl_itemEmbed_${timestamp}`);
 
     this.userFeatDim = (this.useUserFeat && this.userFeatArray && this.userFeatArray.length>0) ? this.userFeatArray[0].length : 0;
 
     // Input dimension calculation: user_emb + item_emb + genres + user_features
     this.inputDim = this.embDim + this.embDim + (this.useGenres ? this.genreDim : 0) + (this.useUserFeat ? this.userFeatDim : 0);
     
-    // MLP layers
-    this.dense1 = tf.layers.dense({units: Math.max(64, this.inputDim), activation: 'relu', useBias: true});
-    this.dense2 = tf.layers.dense({units: 32, activation: 'relu', useBias: true});
-    this.outDense = tf.layers.dense({units: 1, activation: null, useBias: true});
+    // MLP layers with unique names
+    this.dense1 = tf.layers.dense({
+      units: Math.max(64, this.inputDim), 
+      activation: 'relu', 
+      useBias: true,
+      name: `dense1_${timestamp}`
+    });
+    this.dense2 = tf.layers.dense({
+      units: 32, 
+      activation: 'relu', 
+      useBias: true,
+      name: `dense2_${timestamp}`
+    });
+    this.outDense = tf.layers.dense({
+      units: 1, 
+      activation: null, 
+      useBias: true,
+      name: `outDense_${timestamp}`
+    });
 
     // Initialize layers with dummy data
     const dummy = tf.zeros([1, this.inputDim]);
@@ -233,5 +261,23 @@ class DeepRecModel {
         return dotScores;
       }
     });
+  }
+
+  dispose() {
+    if (this.userEmbed) {
+      this.userEmbed.dispose();
+    }
+    if (this.itemEmbed) {
+      this.itemEmbed.dispose();
+    }
+    if (this.dense1) {
+      this.dense1.dispose();
+    }
+    if (this.dense2) {
+      this.dense2.dispose();
+    }
+    if (this.outDense) {
+      this.outDense.dispose();
+    }
   }
 }
