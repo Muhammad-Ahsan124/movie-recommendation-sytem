@@ -25,6 +25,9 @@
     #tooltip { position:fixed; background:#222; color:#fff; padding:6px 8px; border-radius:6px; pointer-events:none; font-size:12px; display:none }
     .small { font-size:12px; color:#666 }
     .hint { margin-top:8px; font-size:12px }
+    .file-row { margin-top:8px; display:flex; gap:8px; align-items:center; }
+    .file-row label { font-size:13px; }
+    .notice { color:#a00; font-weight:600; margin-left:8px; }
   </style>
 </head>
 <body>
@@ -51,7 +54,15 @@
       <input id="inputMaxInt" type="number" value="80000" min="1000" max="100000" style="width:90px">
     </label>
     <span id="status">idle</span>
-    <div class="hint">Tips: Place data files at <code>/data/u.data</code> and <code>/data/u.item</code>. Training in-browser may take a few minutes depending on device — use smaller epochs or embedding dims for faster runs. Works on GitHub Pages (static).</div>
+
+    <div class="file-row">
+      <label>If hosting files are missing, upload them here:</label>
+      <input id="fileUdata" type="file" accept=".data,.txt" style="display:inline-block">
+      <input id="fileUitem" type="file" accept=".item,.txt" style="display:inline-block">
+      <span class="small">(optional)</span>
+    </div>
+
+    <div class="hint">Tips: Place data files at <code>/data/u.data</code> and <code>/data/u.item</code> in your repo. If GitHub Pages gives 404, use the upload inputs above to load files from your computer. Training in-browser may take a few minutes depending on device — use smaller epochs or embedding dims for faster runs. Works on GitHub Pages (static).</div>
   </div>
 
   <div id="ui">
