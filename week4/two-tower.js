@@ -1,6 +1,5 @@
 // two-tower.js
 // Implements TwoTowerModel (embedding tables + in-batch softmax/BPR training) and DeepRecModel (embeddings + MLP taking optional genre and user features).
-// Note: This file is unchanged in core behavior but is included here to ensure you have the full project files.
 
 class TwoTowerModel {
   constructor(numUsers, numItems, embDim=32) {
@@ -8,8 +7,10 @@ class TwoTowerModel {
     this.numItems = numItems;
     this.embDim = embDim;
 
-    this.userEmbed = tf.variable(tf.randomNormal([numUsers, embDim], 0, 0.05), true, 'userEmbed');
-    this.itemEmbed = tf.variable(tf.randomNormal([numItems, embDim], 0, 0.05), true, 'itemEmbed');
+    // Use unique variable names with timestamp to prevent conflicts
+    const timestamp = Date.now();
+    this.userEmbed = tf.variable(tf.randomNormal([numUsers, embDim], 0, 0.05), true, `userEmbed_${timestamp}`);
+    this.itemEmbed = tf.variable(tf.randomNormal([numItems, embDim], 0, 0.05), true, `itemEmbed_${timestamp}`);
   }
 
   userEmbedLookup(uIdxArr) {
@@ -71,6 +72,15 @@ class TwoTowerModel {
       return s;
     });
   }
+
+  dispose() {
+    if (this.userEmbed) {
+      this.userEmbed.dispose();
+    }
+    if (this.itemEmbed) {
+      this.itemEmbed.dispose();
+    }
+  }
 }
 
 class DeepRecModel {
@@ -80,28 +90,53 @@ class DeepRecModel {
     this.embDim = config.embDim || 32;
     this.useGenres = !!config.useGenres;
     this.useUserFeat = !!config.useUserFeat;
-    this.itemMeta = config.itemMeta || new Map();
     this.userFeatArray = config.userFeatArray || null;
+    this.itemGenresArray = config.itemGenresArray || null;
+    this.genreDim = config.genreDim || 0;
 
-    this.userEmbed = tf.variable(tf.randomNormal([this.numUsers, this.embDim], 0, 0.05), true, 'dl_userEmbed');
-    this.itemEmbed = tf.variable(tf.randomNormal([this.numItems, this.embDim], 0, 0.05), true, 'dl_itemEmbed');
-
-    this.genreDim = 0;
-    for (const v of this.itemMeta.values()) { if (v.genres && v.genres.length) { this.genreDim = v.genres.length; break; } }
-    if (!this.genreDim && this.useGenres) this.genreDim = 19;
+    // Use unique variable names with timestamp to prevent conflicts
+    const timestamp = Date.now();
+    this.userEmbed = tf.variable(tf.randomNormal([this.numUsers, this.embDim], 0, 0.05), true, `dl_userEmbed_${timestamp}`);
+    this.itemEmbed = tf.variable(tf.randomNormal([this.numItems, this.embDim], 0, 0.05), true, `dl_itemEmbed_${timestamp}`);
 
     this.userFeatDim = (this.useUserFeat && this.userFeatArray && this.userFeatArray.length>0) ? this.userFeatArray[0].length : 0;
 
+    // Input dimension calculation: user_emb + item_emb + genres + user_features
     this.inputDim = this.embDim + this.embDim + (this.useGenres ? this.genreDim : 0) + (this.useUserFeat ? this.userFeatDim : 0);
-    this.dense1 = tf.layers.dense({units: Math.max(64, this.inputDim*2), activation: 'relu', useBias: true});
-    this.dense2 = tf.layers.dense({units: 32, activation: 'relu', useBias: true});
-    this.outDense = tf.layers.dense({units: 1, activation: null, useBias: true});
-
-    const dummy = tf.zeros([1, this.inputDim]);
-    this.dense1.apply(dummy);
-    this.dense2.apply(this.dense1.apply(dummy));
-    this.outDense.apply(this.dense2.apply(this.dense1.apply(dummy)));
-    dummy.dispose();
+    
+    // MLP layers with unique names - FIXED: Create proper layer variables
+    this.dense1Weights = tf.variable(
+      tf.randomNormal([this.inputDim, Math.max(64, this.inputDim)], 0, 0.05), 
+      true, 
+      `dense1_weights_${timestamp}`
+    );
+    this.dense1Bias = tf.variable(
+      tf.zeros([Math.max(64, this.inputDim)]), 
+      true, 
+      `dense1_bias_${timestamp}`
+    );
+    
+    this.dense2Weights = tf.variable(
+      tf.randomNormal([Math.max(64, this.inputDim), 32], 0, 0.05), 
+      true, 
+      `dense2_weights_${timestamp}`
+    );
+    this.dense2Bias = tf.variable(
+      tf.zeros([32]), 
+      true, 
+      `dense2_bias_${timestamp}`
+    );
+    
+    this.outWeights = tf.variable(
+      tf.randomNormal([32, 1], 0, 0.05), 
+      true, 
+      `out_weights_${timestamp}`
+    );
+    this.outBias = tf.variable(
+      tf.zeros([1]), 
+      true, 
+      `out_bias_${timestamp}`
+    );
   }
 
   userEmbedLookup(uIdxArr) {
@@ -112,11 +147,11 @@ class DeepRecModel {
   }
 
   itemGenreLookup(iIdxArr) {
-    if (!this.useGenres || this.genreDim===0) {
+    if (!this.useGenres || !this.itemGenresArray || this.genreDim===0) {
       return tf.zeros([iIdxArr.length, 0]);
     }
     const arr = iIdxArr.map(i => {
-      return this._genreLookupForInternalIndex(i);
+      return this.itemGenresArray[i] || new Array(this.genreDim).fill(0);
     });
     return tf.tensor2d(arr, [arr.length, this.genreDim]);
   }
@@ -127,38 +162,57 @@ class DeepRecModel {
     return tf.tensor2d(arr, [arr.length, this.userFeatDim]);
   }
 
+  // FIXED: Proper MLP forward pass with manual layers
+  mlpForward(input) {
+    return tf.tidy(() => {
+      const h1 = tf.relu(tf.add(tf.matMul(input, this.dense1Weights), this.dense1Bias));
+      const h2 = tf.relu(tf.add(tf.matMul(h1, this.dense2Weights), this.dense2Bias));
+      const out = tf.add(tf.matMul(h2, this.outWeights), this.outBias);
+      return out;
+    });
+  }
+
   async trainStep(uIdxArr, posIdxArr, optimizer, useBPR=false) {
+    // FIXED: Collect all trainable variables properly
     const trainableVars = [
-      this.userEmbed, this.itemEmbed,
-      ...this.dense1.trainableWeights.map(w => w.val),
-      ...this.dense2.trainableWeights.map(w => w.val),
-      ...this.outDense.trainableWeights.map(w => w.val)
+      this.userEmbed, 
+      this.itemEmbed,
+      this.dense1Weights,
+      this.dense1Bias,
+      this.dense2Weights, 
+      this.dense2Bias,
+      this.outWeights,
+      this.outBias
     ];
 
     const that = this;
-    const lossTensor = await optimizer.minimize(() => {
+    const lossScalar = await optimizer.minimize(() => {
       return tf.tidy(() => {
         const B = uIdxArr.length;
-        const Uembed = that.userEmbedLookup(uIdxArr);
-        const Pembed = that.itemEmbedLookup(posIdxArr);
-        const genreTensor = that.itemGenreLookup(posIdxArr);
-        const userFeatTensor = that.userFeatureLookup(uIdxArr);
+        const Uembed = that.userEmbedLookup(uIdxArr);        // [B, embDim]
+        const Pembed = that.itemEmbedLookup(posIdxArr);      // [B, embDim]
+        const genreTensor = that.itemGenreLookup(posIdxArr); // [B, genreDim]
+        const userFeatTensor = that.userFeatureLookup(uIdxArr); // [B, userFeatDim]
 
-        let input = tf.concat([Uembed, Pembed], 1);
-        if (that.useGenres && that.genreDim>0) input = tf.concat([input, genreTensor], 1);
-        if (that.useUserFeat && that.userFeatDim>0) input = tf.concat([input, userFeatTensor], 1);
+        // Build MLP input by concatenating all features
+        const inputParts = [Uembed, Pembed];
+        if (that.useGenres && that.genreDim > 0) inputParts.push(genreTensor);
+        if (that.useUserFeat && that.userFeatDim > 0) inputParts.push(userFeatTensor);
+        
+        const input = tf.concat(inputParts, 1); // [B, inputDim]
 
-        const h1 = that.dense1.apply(input);
-        const h2 = that.dense2.apply(h1);
-        const out = that.outDense.apply(h2).reshape([B]);
+        // Forward pass through MLP
+        const mlpOut = that.mlpForward(input).reshape([B]); // [B]
 
         if (!useBPR) {
-          const logits = tf.matMul(Uembed, Pembed, false, true);
+          // In-batch softmax loss
+          const logits = tf.matMul(Uembed, Pembed, false, true); // [B, B]
           const labels = tf.oneHot(tf.range(0, B, 1, 'int32'), B);
           const losses = tf.losses.softmaxCrossEntropy(labels, logits, undefined, 'none');
           return losses.mean();
         } else {
-          const negIdxArr = posIdxArr.map((_,i)=>posIdxArr[(i+1)%B]);
+          // BPR pairwise loss
+          const negIdxArr = posIdxArr.map((_,i) => posIdxArr[(i+1)%B]);
           const Nembed = that.itemEmbedLookup(negIdxArr);
           const sPos = tf.sum(tf.mul(Uembed, Pembed), 1);
           const sNeg = tf.sum(tf.mul(Uembed, Nembed), 1);
@@ -169,17 +223,9 @@ class DeepRecModel {
       });
     }, true, trainableVars);
 
-    const val = (await lossTensor.data())[0];
-    lossTensor.dispose();
+    const val = (await lossScalar.data())[0];
+    lossScalar.dispose();
     return val;
-  }
-
-  setInternalItemGenres(arrayOfGenreArrays) {
-    this._internalIdxToGenre = arrayOfGenreArrays;
-    this._genreLookupForInternalIndex = (i) => {
-      if (this._internalIdxToGenre && this._internalIdxToGenre[i]) return this._internalIdxToGenre[i];
-      return new Array(this.genreDim).fill(0);
-    };
   }
 
   async getUserEmbedding(uIdx) {
@@ -189,35 +235,62 @@ class DeepRecModel {
   async scoreAllItems(userEmbTensor) {
     return tf.tidy(() => {
       let u = userEmbTensor;
-      if (u.rank === 1) u = u.expandDims(0);
-      const itemEmbMatrix = this.itemEmbed;
-      const dotScores = tf.matMul(u, itemEmbMatrix, false, true).squeeze();
+      if (u.rank === 1) u = u.expandDims(0); // [1, embDim]
+      
+      const itemEmbMatrix = this.itemEmbed; // [numItems, embDim]
+      
+      // Dot product scores (baseline two-tower)
+      const dotScores = tf.matMul(u, itemEmbMatrix, false, true).squeeze(); // [numItems]
 
-      let mlpScores = null;
-      if (this.useGenres || this.useUserFeat) {
-        let genreMat = null;
-        if (this.genreDim>0 && this._internalIdxToGenre) genreMat = tf.tensor2d(this._internalIdxToGenre, [this._internalIdxToGenre.length, this.genreDim]);
-        else genreMat = tf.zeros([this.numItems, 0]);
+      // MLP-enhanced scores if using additional features
+      if ((this.useGenres && this.genreDim > 0) || (this.useUserFeat && this.userFeatDim > 0)) {
+        // Prepare repeated user embedding for all items
+        const uRepeated = u.tile([this.numItems, 1]); // [numItems, embDim]
+        
+        // Prepare genre features for all items
+        let genreMat = tf.zeros([this.numItems, 0]);
+        if (this.useGenres && this.genreDim > 0 && this.itemGenresArray) {
+          genreMat = tf.tensor2d(this.itemGenresArray, [this.numItems, this.genreDim]);
+        }
+        
+        // Prepare user features repeated for all items  
+        let userFeatMat = tf.zeros([this.numItems, 0]);
+        if (this.useUserFeat && this.userFeatDim > 0 && this.userFeatArray) {
+          // For scoring, we use the features of the single user repeated for all items
+          const singleUserFeat = this.userFeatArray[0] || new Array(this.userFeatDim).fill(0);
+          userFeatMat = tf.tile(tf.tensor2d([singleUserFeat], [1, this.userFeatDim]), [this.numItems, 1]);
+        }
 
-        let userFeatMat = null;
-        if (this.userFeatDim>0 && this.userFeatArray) userFeatMat = tf.tensor2d(this.userFeatArray, [this.userFeatArray.length, this.userFeatDim]);
-        else userFeatMat = tf.zeros([this.numItems, 0]);
+        // Build MLP input
+        const inputParts = [uRepeated, itemEmbMatrix];
+        if (this.useGenres && this.genreDim > 0) inputParts.push(genreMat);
+        if (this.useUserFeat && this.userFeatDim > 0) inputParts.push(userFeatMat);
+        
+        const input = tf.concat(inputParts, 1); // [numItems, inputDim]
 
-        const uRepeated = u.tile([this.numItems,1]);
-        const input = tf.concat([uRepeated, itemEmbMatrix, (this.genreDim>0?genreMat:tf.zeros([this.numItems,0])), (this.userFeatDim>0?userFeatMat:tf.zeros([this.numItems,0]))], 1);
-        const h1 = this.dense1.apply(input);
-        const h2 = this.dense2.apply(h1);
-        mlpScores = this.outDense.apply(h2).reshape([this.numItems]);
-        genreMat.dispose(); userFeatMat.dispose(); uRepeated.dispose(); input.dispose(); h1.dispose(); h2.dispose();
-      }
+        // MLP forward pass
+        const mlpScores = this.mlpForward(input).reshape([this.numItems]); // [numItems]
 
-      if (mlpScores) {
+        // Combine dot product and MLP scores
         const combined = dotScores.add(mlpScores);
-        dotScores.dispose(); if (mlpScores) mlpScores.dispose();
         return combined;
       } else {
+        // Just use dot product scores
         return dotScores;
       }
+    });
+  }
+
+  dispose() {
+    const vars = [
+      this.userEmbed, this.itemEmbed,
+      this.dense1Weights, this.dense1Bias,
+      this.dense2Weights, this.dense2Bias,
+      this.outWeights, this.outBias
+    ];
+    
+    vars.forEach(v => {
+      if (v) v.dispose();
     });
   }
 }
