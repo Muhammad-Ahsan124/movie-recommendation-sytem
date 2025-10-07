@@ -12,6 +12,9 @@ class TwoTowerModel {
         
         // Initialize model parameters
         this.initializeModel();
+        
+        console.log(`Initialized ${useDeepLearning ? 'Deep' : 'Simple'} Two-Tower Model`);
+        console.log(`- Users: ${numUsers}, Items: ${numItems}, Embedding Dim: ${embeddingDim}`);
     }
 
     initializeModel() {
@@ -23,7 +26,7 @@ class TwoTowerModel {
     }
 
     initializeSimpleModel() {
-        // Simple model: direct embedding lookup
+        // Simple model: direct embedding lookup with smaller initialization
         const initializer = tf.initializers.glorotNormal();
         
         this.userEmbedding = tf.variable(
@@ -73,7 +76,7 @@ class TwoTowerModel {
         );
 
         // Item tower with genre features
-        const itemInputDim = this.embeddingDim + (this.items ? 19 : 0); // embedding + genres
+        const itemInputDim = this.embeddingDim + (this.items ? 19 : 0);
         
         this.itemEmbedding = tf.variable(
             initializer.apply([this.numItems, this.embeddingDim]),
@@ -113,23 +116,25 @@ class TwoTowerModel {
     }
 
     userForwardSimple(userIndices) {
-        // Simple: direct embedding lookup
-        return tf.gather(this.userEmbedding, userIndices);
+        return tf.tidy(() => {
+            return tf.gather(this.userEmbedding, userIndices);
+        });
     }
 
     userForwardDeep(userIndices) {
-        // Deep: embedding -> hidden layer -> output
-        const userEmb = tf.gather(this.userEmbedding, userIndices);
-        
-        // MLP: hidden layer with ReLU
-        const hidden = tf.relu(
-            tf.add(tf.matMul(userEmb, this.userHiddenWeights), this.userHiddenBias)
-        );
-        
-        // Output layer (no activation for embeddings)
-        const output = tf.add(tf.matMul(hidden, this.userOutputWeights), this.userOutputBias);
-        
-        return output;
+        return tf.tidy(() => {
+            const userEmb = tf.gather(this.userEmbedding, userIndices);
+            
+            // MLP: hidden layer with ReLU
+            const hidden = tf.relu(
+                tf.add(tf.matMul(userEmb, this.userHiddenWeights), this.userHiddenBias)
+            );
+            
+            // Output layer (no activation for embeddings)
+            const output = tf.add(tf.matMul(hidden, this.userOutputWeights), this.userOutputBias);
+            
+            return output;
+        });
     }
 
     itemForward(itemIndices) {
@@ -141,15 +146,15 @@ class TwoTowerModel {
     }
 
     itemForwardSimple(itemIndices) {
-        // Simple: direct embedding lookup
-        return tf.gather(this.itemEmbedding, itemIndices);
+        return tf.tidy(() => {
+            return tf.gather(this.itemEmbedding, itemIndices);
+        });
     }
 
     itemForwardDeep(itemIndices) {
-        // Deep: embedding + genre features -> hidden layer -> output
-        const itemEmb = tf.gather(this.itemEmbedding, itemIndices);
-        
-        // Add genre features if available
+        return tf.tidy(() => {
+            const itemEmb = tf.gather(this.itemEmbedding, itemIndices);
+            
         let itemFeatures = itemEmb;
         if (this.items) {
             const genreFeatures = this.getGenreFeatures(itemIndices);
@@ -165,23 +170,35 @@ class TwoTowerModel {
         const output = tf.add(tf.matMul(hidden, this.itemOutputWeights), this.itemOutputBias);
         
         return output;
+        });
     }
 
     getGenreFeatures(itemIndices) {
-        // Convert item indices back to original IDs and get genre features
+        // Create genre features tensor
         const genreArray = [];
-        for (let i = 0; i < itemIndices.length; i++) {
-            const itemIndex = itemIndices[i];
-            // This would need the reverse mapping from app.js - we'll simulate for now
-            const genres = new Array(19).fill(0); // Default: no genres
-            genreArray.push(genres);
+        const itemIndicesArray = Array.isArray(itemIndices) ? itemIndices : itemIndices.arraySync();
+        
+        for (let i = 0; i < itemIndicesArray.length; i++) {
+            const itemIndex = itemIndicesArray[i];
+            const originalItemId = Array.from(this.items.keys())[itemIndex] || itemIndex + 1;
+            const item = this.items.get(originalItemId);
+            
+            if (item && item.genres) {
+                genreArray.push(item.genres);
+            } else {
+                // Default: no genres
+                genreArray.push(new Array(19).fill(0));
+            }
         }
+        
         return tf.tensor2d(genreArray);
     }
 
     score(userEmbeddings, itemEmbeddings) {
-        // Dot product between user and item embeddings
-        return tf.sum(tf.mul(userEmbeddings, itemEmbeddings), 1, true);
+        return tf.tidy(() => {
+            // Dot product between user and item embeddings
+            return tf.sum(tf.mul(userEmbeddings, itemEmbeddings), 1, true);
+        });
     }
 
     computeLoss(userIndices, positiveItemIndices) {
@@ -207,13 +224,13 @@ class TwoTowerModel {
         return tf.tidy(() => {
             const lossFn = () => this.computeLoss(userIndices, itemIndices);
             const loss = this.optimizer.minimize(lossFn, true);
-            return loss.dataSync()[0];
+            return loss ? loss.dataSync()[0] : 0;
         });
     }
 
     getItemEmbeddings() {
         if (this.useDeepLearning) {
-            // For deep model, we need to forward pass through the MLP
+            // For deep model, forward pass through the MLP
             const allItemIndices = Array.from({length: this.numItems}, (_, i) => i);
             return this.itemForward(allItemIndices);
         } else {
@@ -252,18 +269,16 @@ class TwoTowerModel {
     }
 
     dispose() {
-        if (this.userEmbedding) this.userEmbedding.dispose();
-        if (this.itemEmbedding) this.itemEmbedding.dispose();
+        const tensors = [
+            this.userEmbedding, this.itemEmbedding,
+            this.userHiddenWeights, this.userHiddenBias, this.userOutputWeights, this.userOutputBias,
+            this.itemHiddenWeights, this.itemHiddenBias, this.itemOutputWeights, this.itemOutputBias
+        ];
         
-        if (this.useDeepLearning) {
-            if (this.userHiddenWeights) this.userHiddenWeights.dispose();
-            if (this.userHiddenBias) this.userHiddenBias.dispose();
-            if (this.userOutputWeights) this.userOutputWeights.dispose();
-            if (this.userOutputBias) this.userOutputBias.dispose();
-            if (this.itemHiddenWeights) this.itemHiddenWeights.dispose();
-            if (this.itemHiddenBias) this.itemHiddenBias.dispose();
-            if (this.itemOutputWeights) this.itemOutputWeights.dispose();
-            if (this.itemOutputBias) this.itemOutputBias.dispose();
-        }
+        tensors.forEach(tensor => {
+            if (tensor && !tensor.isDisposed) {
+                tensor.dispose();
+            }
+        });
     }
 }
