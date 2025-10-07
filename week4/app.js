@@ -50,6 +50,18 @@
   function setProgress(s) { progressDiv.innerText = s; }
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+  // Clean up existing models to prevent variable name conflicts
+  function disposeModels() {
+    if (twoTower) {
+      twoTower.dispose();
+      twoTower = null;
+    }
+    if (deepModel) {
+      deepModel.dispose();
+      deepModel = null;
+    }
+  }
+
   // Simple loss plot
   function plotLoss(lossHistory) {
     const ctx = lossCtx;
@@ -324,6 +336,10 @@
     try {
       btnTrain.disabled = true; btnLoad.disabled = true; btnTest.disabled = true;
       setStatus('initializing models...');
+      
+      // Dispose existing models to prevent variable name conflicts
+      disposeModels();
+      
       const embDim = parseInt(inputEmbDim.value,10) || 32;
       const epochs = parseInt(inputEpochs.value,10) || 5;
       const batchSize = parseInt(inputBatch.value,10) || 128;
