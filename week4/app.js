@@ -1,181 +1,473 @@
-let interactions = [];
-let items = new Map();
-let userToItems = new Map();
-let userIdx = new Map(), itemIdx = new Map(), revUserIdx = [], revItemIdx = [];
-let model;
-
-const statusDiv = document.getElementById('status');
-const lossCanvas = document.getElementById('lossChart');
-const embedCanvas = document.getElementById('embedCanvas');
-const resultDiv = document.getElementById('results');
-
-document.getElementById('loadDataBtn').onclick = loadData;
-document.getElementById('trainBtn').onclick = trainModel;
-document.getElementById('testBtn').onclick = testModel;
-
-// === LOAD DATA ===
-async function loadData() {
-  try {
-    statusDiv.textContent = 'Loading data...';
-    const [udataRes, uitemRes] = await Promise.all([
-      fetch('data/u.data'),
-      fetch('data/u.item')
-    ]);
-
-    if (!udataRes.ok || !uitemRes.ok) {
-      statusDiv.textContent = '❌ Failed to fetch data files. Check paths under /data/.';
-      return;
+// app.js
+class MovieRecommendationApp {
+    constructor() {
+        this.interactions = [];
+        this.items = new Map();
+        this.users = new Map();
+        this.userRatings = new Map();
+        this.userTopRated = new Map();
+        
+        this.userIndexMap = new Map();
+        this.itemIndexMap = new Map();
+        this.reverseUserIndex = new Map();
+        this.reverseItemIndex = new Map();
+        
+        this.simpleModel = null;
+        this.deepModel = null;
+        
+        this.isDataLoaded = false;
+        this.isTraining = false;
+        
+        this.lossHistory = { simple: [], deep: [] };
+        this.currentEpoch = 0;
+        
+        this.initEventListeners();
+        this.updateStatus('Ready to load data...', 'status');
     }
 
-    const udataTxt = await udataRes.text();
-    const uitemTxt = await uitemRes.text();
-
-    // Parse u.item
-    items.clear();
-    uitemTxt.split('\n').forEach(line => {
-      if (!line.trim()) return;
-      const parts = line.split('|');
-      const id = parseInt(parts[0]);
-      const title = parts[1]?.trim();
-      if (id && title) items.set(id, { title });
-    });
-
-    // Parse u.data
-    interactions = [];
-    udataTxt.split('\n').forEach(line => {
-      if (!line.trim()) return;
-      const [u, i, r, ts] = line.split('\t').map(x => parseInt(x));
-      if (!u || !i) return;
-      interactions.push({ userId: u, itemId: i, rating: r, ts });
-    });
-
-    // Limit data
-    const maxInt = parseInt(document.getElementById('maxInteractions').value);
-    interactions = interactions.slice(0, maxInt);
-
-    // Build indexers
-    const users = [...new Set(interactions.map(x => x.userId))];
-    const itemsAll = [...new Set(interactions.map(x => x.itemId))];
-    userIdx.clear(); itemIdx.clear(); revUserIdx = []; revItemIdx = [];
-
-    users.forEach((u, i) => { userIdx.set(u, i); revUserIdx[i] = u; });
-    itemsAll.forEach((i, j) => { itemIdx.set(i, j); revItemIdx[j] = i; });
-
-    // Build user→items
-    userToItems.clear();
-    for (const x of interactions) {
-      if (!userToItems.has(x.userId)) userToItems.set(x.userId, []);
-      userToItems.get(x.userId).push(x);
+    initEventListeners() {
+        document.getElementById('loadData').addEventListener('click', () => this.loadData());
+        document.getElementById('trainModel').addEventListener('click', () => this.trainModel());
+        document.getElementById('testModel').addEventListener('click', () => this.testModel());
     }
 
-    statusDiv.textContent = `✅ Loaded ${interactions.length} interactions, ${users.length} users, ${itemsAll.length} items.`;
-    document.getElementById('trainBtn').disabled = false;
-  } catch (e) {
-    console.error(e);
-    statusDiv.textContent = '❌ Error loading data: ' + e.message;
-  }
-}
+    updateStatus(message, className = 'status') {
+        const statusEl = document.getElementById('status');
+        statusEl.textContent = message;
+        statusEl.className = `status ${className}`;
+    }
 
-// === TRAIN MODEL ===
-async function trainModel() {
-  const embDim = parseInt(document.getElementById('embDim').value);
-  const epochs = parseInt(document.getElementById('epochs').value);
-  const batchSize = parseInt(document.getElementById('batchSize').value);
-  const lr = parseFloat(document.getElementById('lr').value);
+    async loadData() {
+        try {
+            this.updateStatus('Loading data...', 'loading');
+            
+            // Load interactions data
+            const interactionsResponse = await fetch('data/u.data');
+            if (!interactionsResponse.ok) throw new Error('Failed to load u.data');
+            const interactionsText = await interactionsResponse.text();
+            
+            // Load items data
+            const itemsResponse = await fetch('data/u.item');
+            if (!itemsResponse.ok) throw new Error('Failed to load u.item');
+            const itemsText = await itemsResponse.text();
+            
+            this.parseInteractions(interactionsText);
+            this.parseItems(itemsText);
+            this.buildUserItemMappings();
+            this.calculateUserTopRated();
+            
+            this.isDataLoaded = true;
+            document.getElementById('trainModel').disabled = false;
+            this.updateStatus(`Data loaded successfully! Users: ${this.users.size}, Items: ${this.items.size}, Interactions: ${this.interactions.length}`, 'success');
+            
+        } catch (error) {
+            this.updateStatus(`Error loading data: ${error.message}`, 'error');
+            console.error('Data loading error:', error);
+        }
+    }
 
-  const numUsers = userIdx.size;
-  const numItems = itemIdx.size;
+    parseInteractions(data) {
+        const lines = data.trim().split('\n');
+        this.interactions = lines.map(line => {
+            const [userId, itemId, rating, timestamp] = line.split('\t').map(x => parseInt(x));
+            return { userId, itemId, rating, timestamp };
+        });
+    }
 
-  model = new TwoTowerModel(numUsers, numItems, embDim, false);
-  const optimizer = tf.train.adam(lr);
+    parseItems(data) {
+        const lines = data.trim().split('\n');
+        lines.forEach(line => {
+            const parts = line.split('|');
+            if (parts.length >= 3) {
+                const itemId = parseInt(parts[0]);
+                const title = parts[1];
+                const releaseDate = parts[2];
+                
+                // Extract year from title (format: "Title (YYYY)")
+                const yearMatch = title.match(/\((\d{4})\)$/);
+                const year = yearMatch ? parseInt(yearMatch[1]) : null;
+                
+                // Parse genres (last 19 fields)
+                const genres = parts.slice(5, 24).map(x => parseInt(x));
+                
+                this.items.set(itemId, {
+                    title: title.replace(/\s*\(\d{4}\)$/, ''), // Remove year from title
+                    year,
+                    releaseDate,
+                    genres
+                });
+            }
+        });
+    }
 
-  const ctx = lossCanvas.getContext('2d');
-  ctx.clearRect(0,0,lossCanvas.width,lossCanvas.height);
-  ctx.beginPath();
-  let batchCount = 0;
+    buildUserItemMappings() {
+        // Create user mappings
+        const uniqueUsers = [...new Set(this.interactions.map(i => i.userId))].sort((a, b) => a - b);
+        uniqueUsers.forEach((userId, index) => {
+            this.userIndexMap.set(userId, index);
+            this.reverseUserIndex.set(index, userId);
+            this.users.set(userId, { id: userId, index });
+        });
 
-  for (let epoch = 0; epoch < epochs; epoch++) {
-    tf.util.shuffle(interactions);
-    for (let start = 0; start < interactions.length; start += batchSize) {
-      const batch = interactions.slice(start, start + batchSize);
-      const uIdxs = batch.map(x => userIdx.get(x.userId));
-      const iIdxs = batch.map(x => itemIdx.get(x.itemId));
+        // Create item mappings
+        const uniqueItems = [...new Set(this.interactions.map(i => i.itemId))].sort((a, b) => a - b);
+        uniqueItems.forEach((itemId, index) => {
+            this.itemIndexMap.set(itemId, index);
+            this.reverseItemIndex.set(index, itemId);
+        });
 
-      const loss = await model.trainBatch(uIdxs, iIdxs, optimizer);
-      batchCount++;
+        // Build user ratings
+        this.interactions.forEach(interaction => {
+            const userId = interaction.userId;
+            if (!this.userRatings.has(userId)) {
+                this.userRatings.set(userId, []);
+            }
+            this.userRatings.get(userId).push({
+                itemId: interaction.itemId,
+                rating: interaction.rating,
+                timestamp: interaction.timestamp
+            });
+        });
+    }
 
-      if (batchCount % 10 === 0) {
-        const x = batchCount / 5;
-        const y = 200 - Math.min(200, loss * 200);
-        ctx.lineTo(x, y);
+    calculateUserTopRated() {
+        for (const [userId, ratings] of this.userRatings.entries()) {
+            // Sort by rating (descending), then by timestamp (descending for recent)
+            const sorted = ratings.sort((a, b) => {
+                if (b.rating !== a.rating) return b.rating - a.rating;
+                return b.timestamp - a.timestamp;
+            });
+            this.userTopRated.set(userId, sorted.slice(0, 10));
+        }
+    }
+
+    async trainModel() {
+        if (!this.isDataLoaded || this.isTraining) return;
+        
+        this.isTraining = true;
+        document.getElementById('trainModel').disabled = true;
+        this.updateStatus('Starting model training...', 'loading');
+        
+        const config = {
+            epochs: 10,
+            batchSize: 512,
+            embeddingDim: 32,
+            learningRate: 0.001,
+            maxInteractions: 80000
+        };
+
+        // Use subset of data if too large
+        const trainingInteractions = this.interactions.slice(0, config.maxInteractions);
+        
+        // Initialize models
+        this.simpleModel = new TwoTowerModel(
+            this.users.size,
+            this.items.size,
+            config.embeddingDim,
+            false // simple model
+        );
+        
+        this.deepModel = new TwoTowerModel(
+            this.users.size,
+            this.items.size,
+            config.embeddingDim,
+            true, // deep model
+            this.items
+        );
+
+        // Prepare training data
+        const userIndices = trainingInteractions.map(i => this.userIndexMap.get(i.userId));
+        const itemIndices = trainingInteractions.map(i => this.itemIndexMap.get(i.itemId));
+        
+        this.lossHistory = { simple: [], deep: [] };
+        this.currentEpoch = 0;
+        
+        this.initLossChart();
+        
+        // Train both models
+        await this.trainModelIteration(this.simpleModel, userIndices, itemIndices, config, 'simple');
+        await this.trainModelIteration(this.deepModel, userIndices, itemIndices, config, 'deep');
+        
+        this.isTraining = false;
+        document.getElementById('testModel').disabled = false;
+        this.updateStatus('Training completed! Click "Test Recommendation" to see results.', 'success');
+        
+        // Visualize embeddings
+        await this.visualizeEmbeddings();
+    }
+
+    async trainModelIteration(model, userIndices, itemIndices, config, modelType) {
+        const totalBatches = Math.ceil(userIndices.length / config.batchSize);
+        
+        for (let epoch = 0; epoch < config.epochs; epoch++) {
+            this.currentEpoch = epoch;
+            let epochLoss = 0;
+            
+            // Shuffle data
+            const shuffledIndices = tf.util.createShuffledIndices(userIndices.length);
+            const shuffledUsers = shuffledIndices.map(i => userIndices[i]);
+            const shuffledItems = shuffledIndices.map(i => itemIndices[i]);
+            
+            for (let batch = 0; batch < totalBatches; batch++) {
+                const start = batch * config.batchSize;
+                const end = Math.min(start + config.batchSize, userIndices.length);
+                
+                const batchUsers = shuffledUsers.slice(start, end);
+                const batchItems = shuffledItems.slice(start, end);
+                
+                const loss = await model.trainStep(batchUsers, batchItems);
+                epochLoss += loss;
+                
+                // Update loss chart every few batches
+                if (batch % 10 === 0) {
+                    this.updateLossChart(modelType, loss, epoch * totalBatches + batch);
+                    await tf.nextFrame(); // Allow UI updates
+                }
+            }
+            
+            const avgLoss = epochLoss / totalBatches;
+            this.lossHistory[modelType].push(avgLoss);
+            console.log(`${modelType} Model - Epoch ${epoch + 1}/${config.epochs}, Loss: ${avgLoss.toFixed(4)}`);
+            
+            this.updateStatus(
+                `Training ${modelType} model... Epoch ${epoch + 1}/${config.epochs}, Loss: ${avgLoss.toFixed(4)}`,
+                'loading'
+            );
+        }
+    }
+
+    initLossChart() {
+        const canvas = document.getElementById('lossChart');
+        const ctx = canvas.getContext('2d');
+        
+        // Clear canvas
+        ctx.fillStyle = 'white';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        
+        // Draw initial axes
+        ctx.strokeStyle = '#ccc';
+        ctx.beginPath();
+        ctx.moveTo(50, 50);
+        ctx.lineTo(50, canvas.height - 50);
+        ctx.lineTo(canvas.width - 50, canvas.height - 50);
         ctx.stroke();
-      }
+        
+        ctx.fillStyle = 'black';
+        ctx.font = '12px Arial';
+        ctx.fillText('Loss', 10, canvas.height / 2);
+        ctx.fillText('Batch', canvas.width / 2, canvas.height - 10);
     }
-    statusDiv.textContent = `Epoch ${epoch+1}/${epochs} done.`;
-    await tf.nextFrame();
-  }
 
-  statusDiv.textContent = '✅ Training complete!';
-  document.getElementById('testBtn').disabled = false;
+    updateLossChart(modelType, loss, batchIndex) {
+        const canvas = document.getElementById('lossChart');
+        const ctx = canvas.getContext('2d');
+        
+        const x = 50 + (batchIndex % 100) * (canvas.width - 100) / 100;
+        const y = canvas.height - 50 - (loss * 100); // Scale loss for visibility
+        
+        ctx.fillStyle = modelType === 'simple' ? 'blue' : 'red';
+        ctx.beginPath();
+        ctx.arc(x, y, 2, 0, 2 * Math.PI);
+        ctx.fill();
+        
+        // Add legend
+        ctx.fillStyle = 'black';
+        ctx.font = '12px Arial';
+        ctx.fillText('Simple Model (blue)', canvas.width - 150, 30);
+        ctx.fillStyle = 'red';
+        ctx.fillText('Deep Model (red)', canvas.width - 150, 50);
+    }
 
-  drawEmbeddingProjection();
+    async visualizeEmbeddings() {
+        // Use deep model for visualization
+        const itemEmbeddings = this.deepModel.getItemEmbeddings();
+        const sampleSize = Math.min(500, this.items.size);
+        
+        // Sample random items
+        const sampleIndices = [];
+        for (let i = 0; i < sampleSize; i++) {
+            sampleIndices.push(Math.floor(Math.random() * this.items.size));
+        }
+        
+        const sampleEmbeddings = tf.gather(itemEmbeddings, sampleIndices);
+        const embeddings2D = await this.computePCA(sampleEmbeddings, 2);
+        
+        this.drawEmbeddingChart(embeddings2D, sampleIndices);
+    }
+
+    async computePCA(embeddings, components = 2) {
+        // Simple PCA implementation using power iteration
+        const embeddingArray = await embeddings.array();
+        const n = embeddingArray.length;
+        const dim = embeddingArray[0].length;
+        
+        // Center the data
+        const mean = new Array(dim).fill(0);
+        for (let i = 0; i < n; i++) {
+            for (let j = 0; j < dim; j++) {
+                mean[j] += embeddingArray[i][j];
+            }
+        }
+        for (let j = 0; j < dim; j++) {
+            mean[j] /= n;
+        }
+        
+        const centered = embeddingArray.map(row => 
+            row.map((val, j) => val - mean[j])
+        );
+        
+        // Compute covariance matrix
+        const covariance = new Array(dim).fill(0).map(() => new Array(dim).fill(0));
+        for (let i = 0; i < n; i++) {
+            for (let j = 0; j < dim; j++) {
+                for (let k = 0; k < dim; k++) {
+                    covariance[j][k] += centered[i][j] * centered[i][k];
+                }
+            }
+        }
+        for (let j = 0; j < dim; j++) {
+            for (let k = 0; k < dim; k++) {
+                covariance[j][k] /= (n - 1);
+            }
+        }
+        
+        // Simple power method for first two components
+        const projectTo2D = (data, vector1, vector2) => {
+            return data.map(row => [
+                row.reduce((sum, val, i) => sum + val * vector1[i], 0),
+                row.reduce((sum, val, i) => sum + val * vector2[i], 0)
+            ]);
+        };
+        
+        // Use first two dimensions as initial approximation
+        const pc1 = new Array(dim).fill(0).map((_, i) => i === 0 ? 1 : 0);
+        const pc2 = new Array(dim).fill(0).map((_, i) => i === 1 ? 1 : 0);
+        
+        return projectTo2D(centered, pc1, pc2);
+    }
+
+    drawEmbeddingChart(embeddings2D, indices) {
+        const canvas = document.getElementById('embeddingChart');
+        const ctx = canvas.getContext('2d');
+        
+        // Clear canvas
+        ctx.fillStyle = 'white';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        
+        // Find bounds
+        const xValues = embeddings2D.map(p => p[0]);
+        const yValues = embeddings2D.map(p => p[1]);
+        const xMin = Math.min(...xValues);
+        const xMax = Math.max(...xValues);
+        const yMin = Math.min(...yValues);
+        const yMax = Math.max(...yValues);
+        
+        // Scale to canvas
+        const scaleX = (x) => 50 + (x - xMin) * (canvas.width - 100) / (xMax - xMin);
+        const scaleY = (y) => canvas.height - 50 - (y - yMin) * (canvas.height - 100) / (yMax - yMin);
+        
+        // Draw points
+        ctx.fillStyle = 'blue';
+        embeddings2D.forEach((point, i) => {
+            const x = scaleX(point[0]);
+            const y = scaleY(point[1]);
+            
+            ctx.beginPath();
+            ctx.arc(x, y, 3, 0, 2 * Math.PI);
+            ctx.fill();
+        });
+        
+        // Add title
+        ctx.fillStyle = 'black';
+        ctx.font = '14px Arial';
+        ctx.fillText('Item Embeddings Visualization (PCA projection)', canvas.width / 2 - 100, 20);
+    }
+
+    async testModel() {
+        if (!this.simpleModel || !this.deepModel) {
+            this.updateStatus('Please train models first!', 'error');
+            return;
+        }
+
+        this.updateStatus('Generating recommendations...', 'loading');
+
+        // Find users with at least 20 ratings
+        const qualifiedUsers = [...this.userRatings.entries()]
+            .filter(([_, ratings]) => ratings.length >= 20)
+            .map(([userId]) => userId);
+
+        if (qualifiedUsers.length === 0) {
+            this.updateStatus('No qualified users found (need users with ≥20 ratings)', 'error');
+            return;
+        }
+
+        // Select random qualified user
+        const randomUser = qualifiedUsers[Math.floor(Math.random() * qualifiedUsers.length)];
+        const userIndex = this.userIndexMap.get(randomUser);
+        
+        // Get user's rated items
+        const ratedItems = new Set(this.userRatings.get(randomUser).map(r => r.itemId));
+        const ratedItemIndices = [...ratedItems].map(itemId => this.itemIndexMap.get(itemId));
+
+        // Display user info
+        document.getElementById('userInfo').innerHTML = 
+            `<h3>Selected User: ${randomUser} (${this.userRatings.get(randomUser).length} ratings)</h3>`;
+
+        // Get recommendations from both models
+        const simpleRecs = await this.simpleModel.getRecommendations(userIndex, ratedItemIndices, 10);
+        const deepRecs = await this.deepModel.getRecommendations(userIndex, ratedItemIndices, 10);
+
+        // Display results
+        this.displayResults(randomUser, simpleRecs, deepRecs);
+        document.getElementById('resultsContainer').style.display = 'flex';
+        
+        this.updateStatus('Recommendations generated successfully!', 'success');
+    }
+
+    displayResults(userId, simpleRecs, deepRecs) {
+        // Display historical ratings
+        const historicalRatings = this.userTopRated.get(userId) || [];
+        const historicalTable = document.getElementById('historicalTable').querySelector('tbody');
+        historicalTable.innerHTML = '';
+        
+        historicalRatings.forEach((rating, index) => {
+            const item = this.items.get(rating.itemId);
+            const row = historicalTable.insertRow();
+            row.insertCell(0).textContent = index + 1;
+            row.insertCell(1).textContent = item ? `${item.title} (${item.year || 'N/A'})` : `Item ${rating.itemId}`;
+            row.insertCell(2).textContent = rating.rating;
+        });
+
+        // Display simple model recommendations
+        const simpleTable = document.getElementById('simpleRecommendationsTable').querySelector('tbody');
+        simpleTable.innerHTML = '';
+        
+        simpleRecs.forEach((rec, index) => {
+            const itemId = this.reverseItemIndex.get(rec.itemIndex);
+            const item = this.items.get(itemId);
+            const row = simpleTable.insertRow();
+            row.insertCell(0).textContent = index + 1;
+            row.insertCell(1).textContent = item ? `${item.title} (${item.year || 'N/A'})` : `Item ${itemId}`;
+            row.insertCell(2).textContent = rec.score.toFixed(4);
+        });
+
+        // Display deep model recommendations
+        const deepTable = document.getElementById('deepRecommendationsTable').querySelector('tbody');
+        deepTable.innerHTML = '';
+        
+        deepRecs.forEach((rec, index) => {
+            const itemId = this.reverseItemIndex.get(rec.itemIndex);
+            const item = this.items.get(itemId);
+            const row = deepTable.insertRow();
+            row.insertCell(0).textContent = index + 1;
+            row.insertCell(1).textContent = item ? `${item.title} (${item.year || 'N/A'})` : `Item ${itemId}`;
+            row.insertCell(2).textContent = rec.score.toFixed(4);
+        });
+    }
 }
 
-// === TEST ===
-async function testModel() {
-  const eligibleUsers = [...userToItems.keys()].filter(u => userToItems.get(u).length >= 20);
-  const userId = eligibleUsers[Math.floor(Math.random() * eligibleUsers.length)];
-  const userIdxVal = userIdx.get(userId);
-
-  const hist = userToItems.get(userId)
-    .sort((a,b) => b.rating - a.rating || b.ts - a.ts)
-    .slice(0,10)
-    .map(x => items.get(x.itemId)?.title || ('#'+x.itemId));
-
-  const userEmb = model.getUserEmbedding(tf.tensor1d([userIdxVal],'int32'));
-  const allItemEmb = model.itemEmbedding;
-  const scores = tf.matMul(userEmb, allItemEmb, false, true).dataSync();
-
-  const ratedSet = new Set(userToItems.get(userId).map(x => x.itemId));
-  const ranked = scores
-    .map((s, i) => ({ idx: i, s }))
-    .filter(x => !ratedSet.has(revItemIdx[x.idx]))
-    .sort((a,b) => b.s - a.s)
-    .slice(0,10)
-    .map(x => items.get(revItemIdx[x.idx])?.title || ('#'+revItemIdx[x.idx]));
-
-  renderComparison(hist, ranked);
-}
-
-function renderComparison(hist, recs) {
-  let html = '<table><tr><th>Top-10 Rated</th><th>Top-10 Recommended</th></tr>';
-  for (let i=0;i<10;i++) {
-    html += `<tr><td>${hist[i]||''}</td><td>${recs[i]||''}</td></tr>`;
-  }
-  html += '</table>';
-  resultDiv.innerHTML = html;
-}
-
-// === EMBEDDING VISUALIZATION ===
-function drawEmbeddingProjection() {
-  const ctx = embedCanvas.getContext('2d');
-  ctx.clearRect(0,0,embedCanvas.width,embedCanvas.height);
-  const emb = model.itemEmbedding.dataSync();
-  const n = model.itemEmbedding.shape[0];
-  const dim = model.itemEmbedding.shape[1];
-
-  const xs = [], ys = [];
-  // Quick PCA approximation: project on first two dims
-  for (let i=0;i<n;i++) {
-    xs.push(emb[i*dim]);
-    ys.push(emb[i*dim+1]);
-  }
-  const minX=Math.min(...xs), maxX=Math.max(...xs);
-  const minY=Math.min(...ys), maxY=Math.max(...ys);
-  ctx.fillStyle = 'steelblue';
-  for (let i=0;i<xs.length;i+=Math.floor(n/1000)+1) {
-    const x = ((xs[i]-minX)/(maxX-minX))*embedCanvas.width;
-    const y = ((ys[i]-minY)/(maxY-minY))*embedCanvas.height;
-    ctx.fillRect(x, y, 2, 2);
-  }
-}
+// Initialize app when page loads
+let app;
+document.addEventListener('DOMContentLoaded', () => {
+    app = new MovieRecommendationApp();
+});
