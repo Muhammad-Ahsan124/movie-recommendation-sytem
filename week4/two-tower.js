@@ -18,6 +18,9 @@ class TwoTowerModel {
     }
 
     initializeModel() {
+        // Clear any existing variables
+        this.dispose();
+        
         if (this.useDeepLearning) {
             this.initializeDeepModel();
         } else {
@@ -26,7 +29,7 @@ class TwoTowerModel {
     }
 
     initializeSimpleModel() {
-        // Simple model: direct embedding lookup with smaller initialization
+        // Simple model: direct embedding lookup
         const initializer = tf.initializers.glorotNormal();
         
         this.userEmbedding = tf.variable(
@@ -76,8 +79,6 @@ class TwoTowerModel {
         );
 
         // Item tower with genre features
-        const itemInputDim = this.embeddingDim + (this.items ? 19 : 0);
-        
         this.itemEmbedding = tf.variable(
             initializer.apply([this.numItems, this.embeddingDim]),
             true,
@@ -86,7 +87,7 @@ class TwoTowerModel {
         
         // Item MLP layers
         this.itemHiddenWeights = tf.variable(
-            initializer.apply([itemInputDim, 64]),
+            initializer.apply([this.embeddingDim + (this.items ? 19 : 0), 64]),
             true,
             'itemHiddenWeights'
         );
@@ -108,53 +109,50 @@ class TwoTowerModel {
     }
 
     userForward(userIndices) {
-        if (this.useDeepLearning) {
-            return this.userForwardDeep(userIndices);
-        } else {
-            return this.userForwardSimple(userIndices);
-        }
+        return tf.tidy(() => {
+            if (this.useDeepLearning) {
+                return this.userForwardDeep(userIndices);
+            } else {
+                return this.userForwardSimple(userIndices);
+            }
+        });
     }
 
     userForwardSimple(userIndices) {
-        return tf.tidy(() => {
-            return tf.gather(this.userEmbedding, userIndices);
-        });
+        return tf.gather(this.userEmbedding, userIndices);
     }
 
     userForwardDeep(userIndices) {
-        return tf.tidy(() => {
-            const userEmb = tf.gather(this.userEmbedding, userIndices);
-            
-            // MLP: hidden layer with ReLU
-            const hidden = tf.relu(
-                tf.add(tf.matMul(userEmb, this.userHiddenWeights), this.userHiddenBias)
-            );
-            
-            // Output layer (no activation for embeddings)
-            const output = tf.add(tf.matMul(hidden, this.userOutputWeights), this.userOutputBias);
-            
-            return output;
-        });
+        const userEmb = tf.gather(this.userEmbedding, userIndices);
+        
+        // MLP: hidden layer with ReLU
+        const hidden = tf.relu(
+            tf.add(tf.matMul(userEmb, this.userHiddenWeights), this.userHiddenBias)
+        );
+        
+        // Output layer (no activation for embeddings)
+        const output = tf.add(tf.matMul(hidden, this.userOutputWeights), this.userOutputBias);
+        
+        return output;
     }
 
     itemForward(itemIndices) {
-        if (this.useDeepLearning) {
-            return this.itemForwardDeep(itemIndices);
-        } else {
-            return this.itemForwardSimple(itemIndices);
-        }
-    }
-
-    itemForwardSimple(itemIndices) {
         return tf.tidy(() => {
-            return tf.gather(this.itemEmbedding, itemIndices);
+            if (this.useDeepLearning) {
+                return this.itemForwardDeep(itemIndices);
+            } else {
+                return this.itemForwardSimple(itemIndices);
+            }
         });
     }
 
+    itemForwardSimple(itemIndices) {
+        return tf.gather(this.itemEmbedding, itemIndices);
+    }
+
     itemForwardDeep(itemIndices) {
-        return tf.tidy(() => {
-            const itemEmb = tf.gather(this.itemEmbedding, itemIndices);
-            
+        const itemEmb = tf.gather(this.itemEmbedding, itemIndices);
+        
         let itemFeatures = itemEmb;
         if (this.items) {
             const genreFeatures = this.getGenreFeatures(itemIndices);
@@ -170,17 +168,17 @@ class TwoTowerModel {
         const output = tf.add(tf.matMul(hidden, this.itemOutputWeights), this.itemOutputBias);
         
         return output;
-        });
     }
 
     getGenreFeatures(itemIndices) {
         // Create genre features tensor
         const genreArray = [];
-        const itemIndicesArray = Array.isArray(itemIndices) ? itemIndices : itemIndices.arraySync();
+        const itemIndicesArray = Array.isArray(itemIndices) ? itemIndices : Array.from({length: itemIndices.shape[0]}, (_, i) => i);
         
         for (let i = 0; i < itemIndicesArray.length; i++) {
             const itemIndex = itemIndicesArray[i];
-            const originalItemId = Array.from(this.items.keys())[itemIndex] || itemIndex + 1;
+            // Get the original item ID from the index
+            const originalItemId = Array.from(this.items.keys())[itemIndex];
             const item = this.items.get(originalItemId);
             
             if (item && item.genres) {
@@ -230,7 +228,7 @@ class TwoTowerModel {
 
     getItemEmbeddings() {
         if (this.useDeepLearning) {
-            // For deep model, forward pass through the MLP
+            // For deep model, forward pass through the MLP for all items
             const allItemIndices = Array.from({length: this.numItems}, (_, i) => i);
             return this.itemForward(allItemIndices);
         } else {
