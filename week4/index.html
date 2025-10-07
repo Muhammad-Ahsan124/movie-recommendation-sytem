@@ -1,102 +1,52 @@
-index.html
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <title>Two-Tower Retrieval (TF.js) — MovieLens 100K Demo</title>
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta charset="UTF-8" />
+  <title>Two-Tower Retrieval demo (TF.js) — MovieLens 100K</title>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.10.0/dist/tf.min.js"></script>
+  <script src="two-tower.js"></script>
+  <script src="app.js"></script>
   <style>
-    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; margin: 18px; color: #111; }
-    h1 { font-size: 20px; margin-bottom: 4px; }
-    p.lead { margin-top:0; color:#444; font-size:13px; }
-    .controls { margin: 12px 0; display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
-    button { padding:8px 12px; border-radius:8px; border:1px solid #ccc; background:#f6f6f8; cursor:pointer; }
-    button:active { transform:translateY(1px); }
-    .small { font-size:13px; color:#333; }
-    #status { margin-top:8px; padding:10px; border-radius:8px; background:#fafafa; border:1px dashed #eee; min-height:36px; font-size:13px; color:#333; }
-    #charts { display:flex; gap:16px; margin-top:12px; align-items:flex-start; flex-wrap:wrap; }
-    canvas { background: #fff; border:1px solid #eee; border-radius:6px; }
-    #lossCanvas { width:600px; height:160px; }
-    #projCanvas { width:600px; height:400px; }
-    #resultsArea { margin-top:16px; }
-    table.results { border-collapse:collapse; width:100%; max-width:1200px; }
-    table.results th, table.results td { border:1px solid #eee; padding:6px 8px; text-align:left; vertical-align:top; font-size:13px; }
-    .side-by-side { display:flex; gap:12px; align-items:flex-start; flex-wrap:wrap; }
-    .col { flex:1 1 320px; }
-    .tip { margin-top:10px; color:#666; font-size:12px; }
-    .config { display:flex; gap:8px; align-items:center; margin-left:8px; }
-    .config input, .config select { padding:6px; border-radius:6px; border:1px solid #ddd; }
-    .badge { display:inline-block; padding:3px 8px; border-radius:999px; background:#eef; font-size:12px; margin-left:6px; }
-    .hover-title { position: absolute; pointer-events: none; background: #222; color: #fff; padding:6px 8px; border-radius:4px; font-size:12px; display:none; z-index:20; }
+    body { font-family: Arial, sans-serif; margin: 20px; }
+    button { margin: 5px; padding: 6px 12px; }
+    #status { margin-top: 10px; padding: 10px; background: #f5f5f5; border-radius: 4px; }
+    canvas { border: 1px solid #ccc; margin-top: 10px; }
+    table { border-collapse: collapse; margin-top: 10px; width: 100%; }
+    td, th { border: 1px solid #aaa; padding: 4px; text-align: left; }
   </style>
 </head>
 <body>
-  <h1>Two-Tower Retrieval demo (TF.js) — MovieLens 100K</h1>
-  <p class="lead">Client-only demo suitable for GitHub Pages. Click <strong>Load Data</strong>, then <strong>Train</strong>. After training, click <strong>Test</strong> to compare historical vs retrieval recommendations. Deep learning (MLP) option included.</p>
+  <h2>Two-Tower Retrieval demo (TF.js) — MovieLens 100K</h2>
+  <p>
+    Client-only demo suitable for GitHub Pages.<br>
+    Click <b>Load Data</b>, then <b>Train</b>. After training, click <b>Test</b> to compare historical vs retrieval recommendations.
+  </p>
 
-  <div class="controls">
-    <button id="btnLoad">Load Data</button>
-    <button id="btnTrain" disabled>Train</button>
-    <button id="btnTest" disabled>Test</button>
-
-    <div class="config small">
-      <label>Max interactions
-        <input id="maxInteract" type="number" value="80000" min="1000" step="1000" style="width:90px">
-      </label>
-      <label>Emb dim
-        <input id="embDim" type="number" value="32" min="8" max="256" step="8" style="width:70px">
-      </label>
-      <label>Epochs
-        <input id="epochs" type="number" value="6" min="1" max="200" style="width:60px">
-      </label>
-      <label>Batch
-        <input id="batchSize" type="number" value="512" min="16" max="4096" step="16" style="width:80px">
-      </label>
-      <label>LR
-        <input id="lr" type="number" value="0.01" step="0.001" style="width:80px">
-      </label>
-      <label>Loss
-        <select id="lossChoice">
-          <option value="inbatch">In-batch Softmax</option>
-          <option value="bpr">BPR (pairwise)</option>
-        </select>
-      </label>
-      <label>Use MLP
-        <input id="useMLP" type="checkbox" checked>
-      </label>
-    </div>
+  <div>
+    <button id="loadDataBtn">Load Data</button>
+    <button id="trainBtn" disabled>Train</button>
+    <button id="testBtn" disabled>Test</button>
+    <input id="maxInteractions" type="number" value="80000" style="width:100px" />
+    <label>Max interactions</label>
+    <input id="embDim" type="number" value="32" style="width:60px" />
+    <label>Emb dim</label>
+    <input id="epochs" type="number" value="5" style="width:50px" />
+    <label>Epochs</label>
+    <input id="batchSize" type="number" value="512" style="width:60px" />
+    <label>Batch</label>
+    <input id="lr" type="number" value="0.01" step="0.001" style="width:60px" />
+    <label>LR</label>
   </div>
 
-  <div id="status">No data loaded.</div>
+  <div id="status">Waiting for user action...</div>
 
-  <div id="charts">
-    <div>
-      <div style="font-weight:600; font-size:13px; margin-bottom:6px;">Live loss</div>
-      <canvas id="lossCanvas"></canvas>
-    </div>
-    <div>
-      <div style="font-weight:600; font-size:13px; margin-bottom:6px;">Item embedding projection (2D)</div>
-      <canvas id="projCanvas"></canvas>
-      <div class="tip">Hover points to see titles. Only drawn after training. Up to 1000 item sample for speed.</div>
-    </div>
-  </div>
+  <h4>Live loss</h4>
+  <canvas id="lossChart" width="600" height="200"></canvas>
 
-  <div id="resultsArea">
-    <div style="font-weight:600; margin-top:12px;">Test results (click <strong>Test</strong>)</div>
-    <div id="resultsTables" class="side-by-side"></div>
-  </div>
+  <h4>Item embedding projection (2D)</h4>
+  <canvas id="embedCanvas" width="600" height="400"></canvas>
 
-  <div class="tip">
-    Hosting notes: place <code>data/u.data</code> and <code>data/u.item</code> in the repo under <code>/data/</code>. No build step — GitHub Pages serves static files. Training on CPU in the browser can take minutes depending on your settings — reduce epochs/batch size/embedding dim for speed.
-  </div>
-
-  <div class="hover-title" id="hoverTitle"></div>
-
-  <!-- Load TF.js -->
-  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.23.0/dist/tf.min.js"></script>
-
-  <!-- App scripts -->
-  <script src="two-tower.js"></script>
-  <script src="app.js"></script>
+  <h4>Top-10 Rated vs Top-10 Recommended</h4>
+  <div id="results"></div>
 </body>
 </html>
