@@ -1,47 +1,18 @@
-class TwoTowerModel {
-  constructor(numUsers, numItems, embDim) {
-    this.numUsers = numUsers;
-    this.numItems = numItems;
-    this.embDim = embDim;
+async function buildTwoTower(userCount, itemCount, embeddingDim, bprLoss) {
+  const userInput = tf.input({shape:[1], name:'userInput'});
+  const itemInput = tf.input({shape:[1], name:'itemInput'});
 
-    // Two embedding tables
-    this.userEmbedding = tf.variable(tf.randomNormal([numUsers, embDim], 0, 0.05));
-    this.itemEmbedding = tf.variable(tf.randomNormal([numItems, embDim], 0, 0.05));
-  }
+  const userEmbed = tf.layers.embedding({inputDim:userCount+1, outputDim:embeddingDim}).apply(userInput);
+  const itemEmbed = tf.layers.embedding({inputDim:itemCount+1, outputDim:embeddingDim}).apply(itemInput);
 
-  userForward(uIdxTensor) {
-    return tf.gather(this.userEmbedding, uIdxTensor);
-  }
+  const userFlat = tf.layers.flatten().apply(userEmbed);
+  const itemFlat = tf.layers.flatten().apply(itemEmbed);
 
-  itemForward(iIdxTensor) {
-    return tf.gather(this.itemEmbedding, iIdxTensor);
-  }
+  const dot = tf.layers.dot({axes:1, normalize:true}).apply([userFlat, itemFlat]);
+  const out = tf.layers.dense({units:1, activation:'sigmoid'}).apply(dot);
 
-  score(uEmb, iEmb) {
-    return tf.matMul(uEmb, iEmb, false, true);
-  }
-
-  async trainBatch(uIdxs, iIdxs, optimizer) {
-    const u = tf.tensor1d(uIdxs, 'int32');
-    const i = tf.tensor1d(iIdxs, 'int32');
-    const lossFn = () => {
-      const uEmb = this.userForward(u);
-      const iEmb = this.itemForward(i);
-      const logits = this.score(uEmb, iEmb);
-      const labels = tf.tensor1d([...Array(uIdxs.length).keys()], 'int32');
-      const loss = tf.losses.softmaxCrossEntropy(
-        tf.oneHot(labels, iIdxs.length), logits
-      ).mean();
-      return loss;
-    };
-    const { value, grads } = tf.variableGrads(lossFn);
-    optimizer.applyGradients(grads);
-    const lossVal = value.dataSync()[0];
-    tf.dispose([u, i, value, grads]);
-    return lossVal;
-  }
-
-  getUserEmbedding(uTensor) {
-    return this.userForward(uTensor);
-  }
+  const model = tf.model({inputs:[userInput,itemInput], outputs:out});
+  model.compile({optimizer:tf.train.adam(0.001),
+                 loss:bprLoss?'hinge':'binaryCrossentropy'});
+  return model;
 }
