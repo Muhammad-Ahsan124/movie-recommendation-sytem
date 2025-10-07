@@ -39,6 +39,22 @@ class MovieRecommendationApp {
         statusEl.className = `status ${className}`;
     }
 
+    updateProgress(percent, message = '') {
+        const progressBar = document.getElementById('trainingProgress');
+        const progressFill = document.getElementById('progressFill');
+        
+        if (percent > 0) {
+            progressBar.style.display = 'block';
+            progressFill.style.width = `${percent}%`;
+        } else {
+            progressBar.style.display = 'none';
+        }
+        
+        if (message) {
+            this.updateStatus(message, 'loading');
+        }
+    }
+
     async tryMultiplePaths() {
         const paths = [
             'data/u.data',
@@ -53,10 +69,11 @@ class MovieRecommendationApp {
             try {
                 const response = await fetch(path);
                 if (response.ok) {
+                    console.log(`Found file at: ${path}`);
                     return { path, data: await response.text() };
                 }
             } catch (error) {
-                console.log(`Failed to load from ${path}:`, error.message);
+                console.log(`Failed to load from ${path}`);
             }
         }
         return null;
@@ -87,6 +104,7 @@ class MovieRecommendationApp {
                 try {
                     const response = await fetch(path);
                     if (response.ok) {
+                        console.log(`Found file at: ${path}`);
                         itemsResult = { path, data: await response.text() };
                         break;
                     }
@@ -108,10 +126,10 @@ class MovieRecommendationApp {
             
             this.isDataLoaded = true;
             document.getElementById('trainModel').disabled = false;
-            this.updateStatus(`Data loaded successfully!\n- Users: ${this.users.size}\n- Items: ${this.items.size}\n- Interactions: ${this.interactions.length}\n- Files: ${interactionsResult.path}, ${itemsResult.path}`, 'success');
+            this.updateStatus(`✅ Data loaded successfully!\n- Users: ${this.users.size}\n- Items: ${this.items.size}\n- Interactions: ${this.interactions.length}\n- Files: ${interactionsResult.path}, ${itemsResult.path}`, 'success');
             
         } catch (error) {
-            this.updateStatus(`Error: ${error.message}\n\nTry using "Load Sample Data" or upload files manually.`, 'error');
+            this.updateStatus(`❌ Error: ${error.message}\n\nTry using "Load Sample Data" or upload files manually.`, 'error');
             console.error('Data loading error:', error);
         }
     }
@@ -137,10 +155,10 @@ class MovieRecommendationApp {
             
             this.isDataLoaded = true;
             document.getElementById('trainModel').disabled = false;
-            this.updateStatus(`Data loaded successfully from uploaded files!\n- Users: ${this.users.size}\n- Items: ${this.items.size}\n- Interactions: ${this.interactions.length}`, 'success');
+            this.updateStatus(`✅ Data loaded successfully from uploaded files!\n- Users: ${this.users.size}\n- Items: ${this.items.size}\n- Interactions: ${this.interactions.length}`, 'success');
             
         } catch (error) {
-            this.updateStatus(`Upload error: ${error.message}`, 'error');
+            this.updateStatus(`❌ Upload error: ${error.message}`, 'error');
             console.error('Upload error:', error);
         }
     }
@@ -165,10 +183,10 @@ class MovieRecommendationApp {
             
             this.isDataLoaded = true;
             document.getElementById('trainModel').disabled = false;
-            this.updateStatus(`Sample data generated successfully!\n- Users: ${this.users.size}\n- Items: ${this.items.size}\n- Interactions: ${this.interactions.length}\nUsing synthetic data for demonstration.`, 'success');
+            this.updateStatus(`✅ Sample data generated successfully!\n- Users: ${this.users.size}\n- Items: ${this.items.size}\n- Interactions: ${this.interactions.length}\nUsing synthetic data for demonstration.`, 'success');
             
         } catch (error) {
-            this.updateStatus(`Sample data error: ${error.message}`, 'error');
+            this.updateStatus(`❌ Sample data error: ${error.message}`, 'error');
             console.error('Sample data error:', error);
         }
     }
@@ -176,23 +194,28 @@ class MovieRecommendationApp {
     generateSampleData() {
         // Generate sample movies
         const sampleMovies = [
-            { id: 1, title: "Toy Story", year: 1995 },
-            { id: 2, title: "Jumanji", year: 1995 },
-            { id: 3, title: "Grumpier Old Men", year: 1995 },
-            { id: 4, title: "Waiting to Exhale", year: 1995 },
-            { id: 5, title: "Father of the Bride Part II", year: 1995 },
-            { id: 6, title: "Heat", year: 1995 },
-            { id: 7, title: "Sabrina", year: 1995 },
-            { id: 8, title: "Tom and Huck", year: 1995 },
-            { id: 9, title: "Sudden Death", year: 1995 },
-            { id: 10, title: "GoldenEye", year: 1995 }
+            { id: 1, title: "Toy Story (1995)", year: 1995 },
+            { id: 2, title: "Jumanji (1995)", year: 1995 },
+            { id: 3, title: "Grumpier Old Men (1995)", year: 1995 },
+            { id: 4, title: "Waiting to Exhale (1995)", year: 1995 },
+            { id: 5, title: "Father of the Bride Part II (1995)", year: 1995 },
+            { id: 6, title: "Heat (1995)", year: 1995 },
+            { id: 7, title: "Sabrina (1995)", year: 1995 },
+            { id: 8, title: "Tom and Huck (1995)", year: 1995 },
+            { id: 9, title: "Sudden Death (1995)", year: 1995 },
+            { id: 10, title: "GoldenEye (1995)", year: 1995 },
+            { id: 11, title: "The American President (1995)", year: 1995 },
+            { id: 12, title: "Dracula: Dead and Loving It (1995)", year: 1995 },
+            { id: 13, title: "Balto (1995)", year: 1995 },
+            { id: 14, title: "Nixon (1995)", year: 1995 },
+            { id: 15, title: "Cutthroat Island (1995)", year: 1995 }
         ];
 
         // Create items map
         this.items.clear();
         sampleMovies.forEach(movie => {
             this.items.set(movie.id, {
-                title: movie.title,
+                title: movie.title.replace(/\s*\(\d{4}\)$/, ''),
                 year: movie.year,
                 genres: new Array(19).fill(0).map(() => Math.random() > 0.7 ? 1 : 0)
             });
@@ -200,8 +223,8 @@ class MovieRecommendationApp {
 
         // Generate sample interactions
         this.interactions = [];
-        for (let userId = 1; userId <= 50; userId++) {
-            const numRatings = Math.floor(Math.random() * 15) + 5; // 5-20 ratings per user
+        for (let userId = 1; userId <= 100; userId++) {
+            const numRatings = Math.floor(Math.random() * 20) + 10; // 10-30 ratings per user
             const ratedItems = new Set();
             
             for (let i = 0; i < numRatings; i++) {
@@ -229,21 +252,16 @@ class MovieRecommendationApp {
         const lines = data.trim().split('\n');
         this.interactions = lines.map((line, index) => {
             try {
-                const parts = line.split(/\t|,/); // Support both tab and comma separation
-                if (parts.length >= 3) {
-                    const userId = parseInt(parts[0]);
-                    const itemId = parseInt(parts[1]);
-                    const rating = parseInt(parts[2]);
-                    const timestamp = parts[3] ? parseInt(parts[3]) : Date.now();
-                    
-                    if (isNaN(userId) || isNaN(itemId) || isNaN(rating)) {
-                        console.warn(`Skipping invalid line ${index}: ${line}`);
-                        return null;
+                // Try tab separation first, then fallback to any whitespace
+                const parts = line.split(/\t/);
+                if (parts.length < 3) {
+                    const altParts = line.split(/\s+/);
+                    if (altParts.length >= 3) {
+                        return this.createInteraction(altParts, index);
                     }
-                    
-                    return { userId, itemId, rating, timestamp };
+                    return null;
                 }
-                return null;
+                return this.createInteraction(parts, index);
             } catch (error) {
                 console.warn(`Error parsing line ${index}: ${line}`, error);
                 return null;
@@ -251,6 +269,20 @@ class MovieRecommendationApp {
         }).filter(interaction => interaction !== null);
         
         console.log(`Parsed ${this.interactions.length} interactions`);
+    }
+
+    createInteraction(parts, index) {
+        const userId = parseInt(parts[0]);
+        const itemId = parseInt(parts[1]);
+        const rating = parseInt(parts[2]);
+        const timestamp = parts[3] ? parseInt(parts[3]) : Date.now();
+        
+        if (isNaN(userId) || isNaN(itemId) || isNaN(rating)) {
+            console.warn(`Skipping invalid line ${index}: ${parts.join(', ')}`);
+            return null;
+        }
+        
+        return { userId, itemId, rating, timestamp };
     }
 
     parseItems(data) {
@@ -261,7 +293,7 @@ class MovieRecommendationApp {
             try {
                 // Try pipe separation first (original format), then fallback to tab
                 let parts = line.split('|');
-                if (parts.length < 3) {
+                if (parts.length < 2) {
                     parts = line.split('\t');
                 }
                 
@@ -299,6 +331,14 @@ class MovieRecommendationApp {
     }
 
     buildUserItemMappings() {
+        // Reset all mappings
+        this.userIndexMap.clear();
+        this.itemIndexMap.clear();
+        this.reverseUserIndex.clear();
+        this.reverseItemIndex.clear();
+        this.users.clear();
+        this.userRatings.clear();
+
         // Create user mappings
         const uniqueUsers = [...new Set(this.interactions.map(i => i.userId))].sort((a, b) => a - b);
         uniqueUsers.forEach((userId, index) => {
@@ -315,7 +355,6 @@ class MovieRecommendationApp {
         });
 
         // Build user ratings
-        this.userRatings.clear();
         this.interactions.forEach(interaction => {
             const userId = interaction.userId;
             if (!this.userRatings.has(userId)) {
@@ -327,6 +366,8 @@ class MovieRecommendationApp {
                 timestamp: interaction.timestamp
             });
         });
+
+        console.log(`Built mappings: ${this.users.size} users, ${this.items.size} items`);
     }
 
     calculateUserTopRated() {
@@ -351,10 +392,10 @@ class MovieRecommendationApp {
         
         const config = {
             epochs: 10,
-            batchSize: 256, // Reduced for stability
+            batchSize: 256,
             embeddingDim: 32,
             learningRate: 0.001,
-            maxInteractions: Math.min(50000, this.interactions.length) // Limit for performance
+            maxInteractions: Math.min(50000, this.interactions.length)
         };
 
         // Use subset of data if too large
@@ -385,16 +426,23 @@ class MovieRecommendationApp {
         
         this.initLossChart();
         
-        // Train both models
-        await this.trainModelIteration(this.simpleModel, userIndices, itemIndices, config, 'simple');
-        await this.trainModelIteration(this.deepModel, userIndices, itemIndices, config, 'deep');
-        
-        this.isTraining = false;
-        document.getElementById('testModel').disabled = false;
-        this.updateStatus('Training completed! Click "Test Recommendation" to see results.', 'success');
-        
-        // Visualize embeddings
-        await this.visualizeEmbeddings();
+        try {
+            // Train both models
+            await this.trainModelIteration(this.simpleModel, userIndices, itemIndices, config, 'simple');
+            await this.trainModelIteration(this.deepModel, userIndices, itemIndices, config, 'deep');
+            
+            this.isTraining = false;
+            document.getElementById('testModel').disabled = false;
+            this.updateStatus('✅ Training completed! Click "Test Recommendation" to see results.', 'success');
+            
+            // Visualize embeddings
+            await this.visualizeEmbeddings();
+        } catch (error) {
+            this.isTraining = false;
+            document.getElementById('trainModel').disabled = false;
+            this.updateStatus(`❌ Training failed: ${error.message}`, 'error');
+            console.error('Training error:', error);
+        }
     }
 
     async trainModelIteration(model, userIndices, itemIndices, config, modelType) {
@@ -404,6 +452,10 @@ class MovieRecommendationApp {
             this.currentEpoch = epoch;
             let epochLoss = 0;
             let batchCount = 0;
+            
+            // Calculate progress
+            const overallProgress = ((modelType === 'simple' ? epoch : epoch + config.epochs) / (config.epochs * 2)) * 100;
+            this.updateProgress(overallProgress, `Training ${modelType} model... Epoch ${epoch + 1}/${config.epochs}`);
             
             // Shuffle data
             const shuffledIndices = tf.util.createShuffledIndices(userIndices.length);
@@ -427,14 +479,6 @@ class MovieRecommendationApp {
                         this.updateLossChart(modelType, loss, epoch * totalBatches + batch);
                         await tf.nextFrame(); // Allow UI updates
                     }
-                    
-                    // Update status periodically
-                    if (batch % 20 === 0) {
-                        this.updateStatus(
-                            `Training ${modelType} model...\nEpoch ${epoch + 1}/${config.epochs}, Batch ${batch + 1}/${totalBatches}\nCurrent Loss: ${loss.toFixed(4)}`,
-                            'loading'
-                        );
-                    }
                 } catch (error) {
                     console.error(`Training error in ${modelType} model, batch ${batch}:`, error);
                 }
@@ -443,17 +487,6 @@ class MovieRecommendationApp {
             const avgLoss = batchCount > 0 ? epochLoss / batchCount : 0;
             this.lossHistory[modelType].push(avgLoss);
             console.log(`${modelType} Model - Epoch ${epoch + 1}/${config.epochs}, Loss: ${avgLoss.toFixed(4)}`);
-            
-            this.updateStatus(
-                `${modelType} model: Epoch ${epoch + 1}/${config.epochs} completed\nAverage Loss: ${avgLoss.toFixed(4)}`,
-                'loading'
-            );
-            
-            // Force garbage collection
-            if (tf.memory().numTensors > 1000) {
-                tf.engine().startScope();
-                tf.engine().endScope();
-            }
         }
     }
 
@@ -487,7 +520,7 @@ class MovieRecommendationApp {
         const ctx = canvas.getContext('2d');
         
         const x = 50 + (batchIndex % 200) * (canvas.width - 100) / 200;
-        const y = canvas.height - 50 - Math.min(loss * 50, canvas.height - 100); // Scale loss
+        const y = canvas.height - 50 - Math.min(loss * 50, canvas.height - 100);
         
         ctx.fillStyle = modelType === 'simple' ? 'blue' : 'red';
         ctx.beginPath();
@@ -497,6 +530,8 @@ class MovieRecommendationApp {
 
     async visualizeEmbeddings() {
         try {
+            this.updateStatus('Visualizing item embeddings...', 'loading');
+            
             // Use deep model for visualization
             const itemEmbeddings = this.deepModel.getItemEmbeddings();
             const sampleSize = Math.min(200, this.items.size);
@@ -540,7 +575,7 @@ class MovieRecommendationApp {
                 row.map((val, j) => val - mean[j])
             );
             
-            // Simple projection using first two dimensions (approximation)
+            // Simple projection using first two dimensions
             const projected = centered.map(row => [row[0], row[1]]);
             
             return projected;
@@ -622,7 +657,7 @@ class MovieRecommendationApp {
         this.displayResults(randomUser, simpleRecs, deepRecs);
         document.getElementById('resultsContainer').style.display = 'flex';
         
-        this.updateStatus('Recommendations generated successfully!', 'success');
+        this.updateStatus('✅ Recommendations generated successfully!', 'success');
     }
 
     displayResults(userId, simpleRecs, deepRecs) {
@@ -671,4 +706,5 @@ class MovieRecommendationApp {
 let app;
 document.addEventListener('DOMContentLoaded', () => {
     app = new MovieRecommendationApp();
+    console.log('Movie Recommendation App initialized');
 });
