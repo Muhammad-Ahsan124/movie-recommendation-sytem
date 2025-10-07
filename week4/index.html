@@ -45,6 +45,7 @@
             margin: 10px 0;
             border-radius: 4px;
             background-color: #e9ecef;
+            white-space: pre-wrap;
         }
         .chart-container {
             margin: 20px 0;
@@ -84,6 +85,9 @@
         .error {
             color: #dc3545;
         }
+        .warning {
+            color: #ffc107;
+        }
         .info-box {
             background-color: #d1ecf1;
             border: 1px solid #bee5eb;
@@ -91,21 +95,47 @@
             padding: 15px;
             margin: 20px 0;
         }
+        .file-input {
+            margin: 10px 0;
+        }
     </style>
 </head>
 <body>
     <h1>Movie Recommendation System - Two Tower Model</h1>
     
     <div class="container">
-        <h2>Controls</h2>
+        <h2>Data Loading</h2>
         <div class="button-group">
-            <button id="loadData">Load Data</button>
+            <button id="loadData">Load Data from Files</button>
+            <button id="loadSampleData">Load Sample Data</button>
+        </div>
+        
+        <div class="file-input">
+            <label>Or upload your data files:</label><br>
+            <input type="file" id="uDataFile" accept=".data,.txt" style="margin: 5px 0;">
+            <input type="file" id="uItemFile" accept=".item,.txt" style="margin: 5px 0;">
+            <button id="uploadData">Upload and Load</button>
+        </div>
+        
+        <div id="status" class="status">
+            Ready to load data. Click "Load Data from Files" to load from data/ folder, or use sample data.
+        </div>
+    </div>
+
+    <div class="container">
+        <h2>Model Training</h2>
+        <div class="button-group">
             <button id="trainModel" disabled>Train Model</button>
             <button id="testModel" disabled>Test Recommendation</button>
         </div>
         
-        <div id="status" class="status">
-            Ready to load data...
+        <div class="info-box">
+            <strong>Training Configuration:</strong><br>
+            - Simple Model: Direct embedding lookup<br>
+            - Deep Model: MLP with hidden layers + genre features<br>
+            - Embedding Dimension: 32<br>
+            - Training Epochs: 10<br>
+            - Batch Size: 512
         </div>
     </div>
 
@@ -172,11 +202,11 @@
     <div class="info-box">
         <h3>Usage Tips:</h3>
         <ul>
-            <li><strong>Data Loading:</strong> Loads MovieLens 100K dataset from data/u.data and data/u.item</li>
+            <li><strong>Data Loading:</strong> Try different methods if files aren't found</li>
+            <li><strong>File Names:</strong> Expected: u.data and u.item (or adata and utkem)</li>
             <li><strong>Training:</strong> Trains two models - Simple (embedding only) and Deep Learning (MLP towers)</li>
             <li><strong>Training Time:</strong> Expect 2-5 minutes for 10 epochs in modern browsers</li>
             <li><strong>Testing:</strong> Randomly selects a user with ≥20 ratings and shows recommendations</li>
-            <li><strong>Hosting:</strong> Deploy on GitHub Pages by placing files in root directory with data/ folder</li>
         </ul>
     </div>
 
