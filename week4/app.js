@@ -1,179 +1,189 @@
-// app.js
-let data = [], items = new Map();
-let userToRated = new Map();
-let userIndexer = new Map(), itemIndexer = new Map();
-let idxToUser = [], idxToItem = [];
-let model, deepModel;
-let userFeatures, itemFeatures;
+let interactions = [];
+let items = new Map();
+let userToItems = new Map();
+let userIdx = new Map(), itemIdx = new Map(), revUserIdx = [], revItemIdx = [];
+let model;
 
-async function fetchFile(path) {
-  const r = await fetch(path);
-  if (!r.ok) throw new Error(`${path} not found`);
-  return await r.text();
-}
+const statusDiv = document.getElementById('status');
+const lossCanvas = document.getElementById('lossChart');
+const embedCanvas = document.getElementById('embedCanvas');
+const resultDiv = document.getElementById('results');
+
+document.getElementById('loadDataBtn').onclick = loadData;
+document.getElementById('trainBtn').onclick = trainModel;
+document.getElementById('testBtn').onclick = testModel;
 
 async function loadData() {
-  const status = document.getElementById('status');
   try {
-    const udata = await fetchFile('data/u.data');
-    const uitem = await fetchFile('data/u.item');
-    const lines = udata.trim().split('\n');
-    const itemLines = uitem.trim().split('\n');
-    itemLines.forEach(l => {
-      const p = l.split('|');
-      const id = parseInt(p[0]);
-      const title = p[1];
-      const genres = p.slice(-19).map(x => parseInt(x));
-      items.set(id, { title, genres });
-    });
+    statusDiv.textContent = 'Loading data...';
+    const [udataRes, uitemRes] = await Promise.all([
+      fetch('data/u.data'),
+      fetch('data/u.item')
+    ]);
 
-    data = lines.map(l => {
-      const [u, i, r, t] = l.split('\t').map(Number);
-      return { u, i, r, t };
-    });
-
-    // Build mappings
-    const users = [...new Set(data.map(x => x.u))];
-    const itemIds = [...items.keys()];
-    users.forEach((u, j) => { userIndexer.set(u, j); idxToUser[j] = u; });
-    itemIds.forEach((i, j) => { itemIndexer.set(i, j); idxToItem[j] = i; });
-
-    // Build user->rated
-    userToRated = new Map();
-    for (const d of data) {
-      if (!userToRated.has(d.u)) userToRated.set(d.u, []);
-      userToRated.get(d.u).push(d);
+    if (!udataRes.ok || !uitemRes.ok) {
+      statusDiv.textContent = '❌ Failed to fetch data files. Check /data folder.';
+      return;
     }
 
-    status.textContent = `Loaded ${data.length} interactions, ${users.length} users, ${itemIds.length} items`;
+    const udataTxt = await udataRes.text();
+    const uitemTxt = await uitemRes.text();
+
+    // Parse u.item
+    items.clear();
+    uitemTxt.split('\n').forEach(line => {
+      if (!line.trim()) return;
+      const parts = line.split('|');
+      const id = parseInt(parts[0]);
+      const title = parts[1]?.trim();
+      if (id && title) items.set(id, { title });
+    });
+
+    // Parse u.data
+    interactions = [];
+    udataTxt.split('\n').forEach(line => {
+      if (!line.trim()) return;
+      const [u, i, r, ts] = line.split('\t').map(Number);
+      if (!u || !i) return;
+      interactions.push({ userId: u, itemId: i, rating: r, ts });
+    });
+
+    const maxInt = parseInt(document.getElementById('maxInteractions').value);
+    interactions = interactions.slice(0, maxInt);
+
+    // Index maps
+    const users = [...new Set(interactions.map(x => x.userId))];
+    const itemSet = [...new Set(interactions.map(x => x.itemId))];
+    userIdx.clear(); itemIdx.clear(); revUserIdx = []; revItemIdx = [];
+    users.forEach((u, i) => { userIdx.set(u, i); revUserIdx[i] = u; });
+    itemSet.forEach((i, j) => { itemIdx.set(i, j); revItemIdx[j] = i; });
+
+    // User → items
+    userToItems.clear();
+    for (const x of interactions) {
+      if (!userToItems.has(x.userId)) userToItems.set(x.userId, []);
+      userToItems.get(x.userId).push(x);
+    }
+
+    statusDiv.textContent = `✅ Loaded ${interactions.length} interactions, ${users.length} users, ${itemSet.length} items.`;
+    document.getElementById('trainBtn').disabled = false;
   } catch (e) {
-    status.textContent = 'Error loading data: ' + e.message;
+    console.error(e);
+    statusDiv.textContent = '❌ Error loading data: ' + e.message;
   }
 }
-document.getElementById('loadBtn').onclick = loadData;
 
+// === TRAIN ===
 async function trainModel() {
   const embDim = parseInt(document.getElementById('embDim').value);
   const epochs = parseInt(document.getElementById('epochs').value);
-  const batchSize = parseInt(document.getElementById('batch').value);
-  const maxInt = parseInt(document.getElementById('maxInt').value);
-  const useBPR = document.getElementById('useBPR').checked;
-  const useGenres = document.getElementById('useGenres').checked;
-  const useUserFeat = document.getElementById('useUserFeat').checked;
-  const useDeep = document.getElementById('useDeep').checked;
-  const status = document.getElementById('status');
-  const lossCanvas = document.getElementById('lossChart');
+  const batchSize = parseInt(document.getElementById('batchSize').value);
+  const lr = parseFloat(document.getElementById('lr').value);
+
+  const numUsers = userIdx.size;
+  const numItems = itemIdx.size;
+
+  model = new TwoTowerModel(numUsers, numItems, embDim);
+  const optimizer = tf.train.adam(lr);
+
   const ctx = lossCanvas.getContext('2d');
   ctx.clearRect(0,0,lossCanvas.width,lossCanvas.height);
+  ctx.beginPath();
+  let step = 0;
 
-  const numUsers = userIndexer.size;
-  const numItems = itemIndexer.size;
-  const interactions = data.slice(0, maxInt);
-  model = new TwoTowerModel(numUsers, numItems, embDim, useBPR);
-
-  // prepare optional features
-  if (useDeep) {
-    // synthesize user features (mean rating count, avg rating)
-    const uFeat = [];
-    for (let i=0; i<numUsers; i++) {
-      const uid = idxToUser[i];
-      const rated = userToRated.get(uid) || [];
-      const avgR = rated.length ? rated.reduce((a,b)=>a+b.r,0)/rated.length : 0;
-      uFeat.push([rated.length/50.0, avgR/5.0]);
-    }
-    userFeatures = tf.tensor2d(uFeat);
-    const itemFeat = [];
-    for (let i=0; i<numItems; i++) {
-      const id = idxToItem[i];
-      const g = items.get(id)?.genres || new Array(19).fill(0);
-      itemFeat.push(g);
-    }
-    itemFeatures = tf.tensor2d(itemFeat);
-    deepModel = new DeepMLPModel(numUsers, numItems, embDim, 2, 19);
-  }
-
-  const losses = [];
-  for (let ep=0; ep<epochs; ep++) {
+  for (let epoch = 0; epoch < epochs; epoch++) {
     tf.util.shuffle(interactions);
-    for (let i=0; i<interactions.length; i+=batchSize) {
-      const batch = interactions.slice(i,i+batchSize);
-      const uIdx = tf.tensor1d(batch.map(b=>userIndexer.get(b.u)),'int32');
-      const iIdx = tf.tensor1d(batch.map(b=>itemIndexer.get(b.i)),'int32');
-      const loss = model.trainStep(uIdx, iIdx);
-      if (useDeep) deepModel.trainStep(uIdx, iIdx,
-          tf.gather(userFeatures, uIdx), tf.gather(itemFeatures, iIdx));
-      const lossVal = await loss.data();
-      losses.push(lossVal[0]);
-      if (i % (batchSize*10) === 0) drawLoss(ctx, losses);
-      tf.dispose([uIdx,iIdx,loss]);
+    for (let start = 0; start < interactions.length; start += batchSize) {
+      const batch = interactions.slice(start, start + batchSize);
+      const uIdxs = batch.map(x => userIdx.get(x.userId));
+      const iIdxs = batch.map(x => itemIdx.get(x.itemId));
+
+      const lossVal = await model.trainBatch(uIdxs, iIdxs, optimizer);
+      step++;
+
+      if (step % 10 === 0) {
+        const x = step / 5;
+        const y = 200 - Math.min(200, lossVal * 200);
+        ctx.lineTo(x, y);
+        ctx.stroke();
+      }
     }
-    status.textContent = `Epoch ${ep+1}/${epochs}`;
+    statusDiv.textContent = `Epoch ${epoch+1}/${epochs} completed`;
+    await tf.nextFrame();
   }
-  drawLoss(ctx, losses);
-  status.textContent = 'Training complete';
+
+  statusDiv.textContent = '✅ Training complete!';
+  document.getElementById('testBtn').disabled = false;
+
   drawEmbeddingProjection();
 }
-document.getElementById('trainBtn').onclick = trainModel;
 
-function drawLoss(ctx, arr) {
-  ctx.clearRect(0,0,400,200);
-  ctx.beginPath();
-  arr.forEach((v,i)=>{
-    const x=i*400/arr.length, y=200 - (v*50);
-    if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
-  });
-  ctx.stroke();
-}
-
-function drawEmbeddingProjection() {
-  const proj = document.getElementById('projCanvas');
-  const ctx = proj.getContext('2d');
-  ctx.clearRect(0,0,proj.width,proj.height);
-  const W = model.itemEmbedding.dataSync();
-  const mat = tf.tensor2d(W, [model.numItems, model.embDim]);
-  const mean = mat.mean(0);
-  const centered = mat.sub(mean);
-  const cov = tf.matMul(centered.transpose(), centered);
-  const [vals, vecs] = tf.linalg.eigh(cov);
-  const top2 = vecs.slice([0, model.embDim-2],[model.embDim,2]);
-  const proj2D = tf.matMul(centered, top2);
-  const coords = proj2D.arraySync();
-  coords.slice(0,1000).forEach((c,i)=>{
-    const x = (c[0]*20)+300, y=(c[1]*20)+200;
-    ctx.fillRect(x,y,2,2);
-  });
-}
-
+// === TEST ===
 async function testModel() {
-  const resultsDiv = document.getElementById('resultsTable');
-  const users = [...userToRated.keys()].filter(u=>userToRated.get(u).length>=20);
-  const uid = users[Math.floor(Math.random()*users.length)];
-  const rated = userToRated.get(uid).sort((a,b)=>b.r-a.r).slice(0,10);
-  const uIdx = tf.tensor1d([userIndexer.get(uid)],'int32');
-  const uEmb = model.getUserEmbedding(uIdx);
-  const scores = model.getScoresForAllItems(uEmb).arraySync()[0];
-  const ratedIds = new Set(rated.map(x=>x.i));
-  const recs = [...scores.map((s,i)=>({i:idxToItem[i],s}))].filter(x=>!ratedIds.has(x.i))
-    .sort((a,b)=>b.s-a.s).slice(0,10);
+  if (!model) return;
 
-  let deepRecs = [];
-  if (deepModel) {
-    const userFeat = tf.gather(userFeatures, uIdx);
-    const itemFeatMat = itemFeatures;
-    const deepScores = deepModel.getScoresForAllItems(userFeat, itemFeatMat).arraySync()[0];
-    deepRecs = [...deepScores.map((s,i)=>({i:idxToItem[i],s}))].filter(x=>!ratedIds.has(x.i))
-      .sort((a,b)=>b.s-a.s).slice(0,10);
+  const eligible = [...userToItems.keys()].filter(u => userToItems.get(u).length >= 20);
+  if (eligible.length === 0) {
+    statusDiv.textContent = '⚠️ No users with ≥20 ratings.';
+    return;
   }
+  const userId = eligible[Math.floor(Math.random() * eligible.length)];
+  const hist = userToItems.get(userId)
+    .sort((a,b) => b.rating - a.rating || b.ts - a.ts)
+    .slice(0,10)
+    .map(x => items.get(x.itemId)?.title || ('#'+x.itemId));
 
-  const ratedTitles = rated.map(x=>items.get(x.i)?.title||x.i);
-  const recTitles = recs.map(x=>items.get(x.i)?.title||x.i);
-  const deepTitles = deepRecs.map(x=>items.get(x.i)?.title||x.i);
+  const uIdxVal = userIdx.get(userId);
+  const userEmb = model.getUserEmbedding(tf.tensor1d([uIdxVal],'int32'));
+  const allItemEmb = model.itemEmbedding;
+  const scores = tf.matMul(userEmb, allItemEmb, false, true).dataSync();
 
-  let html = `<h4>User ${uid} — Comparison</h4><table><tr><th>Top-10 Rated</th><th>Two-Tower Recs</th><th>Deep (MLP) Recs</th></tr>`;
-  for(let i=0;i<10;i++){
-    html+=`<tr><td>${ratedTitles[i]||''}</td><td>${recTitles[i]||''}</td><td>${deepTitles[i]||''}</td></tr>`;
-  }
-  html+='</table>';
-  resultsDiv.innerHTML = html;
+  const rated = new Set(userToItems.get(userId).map(x => x.itemId));
+  const ranked = scores.map((s,i)=>({i,s}))
+    .filter(o=>!rated.has(revItemIdx[o.i]))
+    .sort((a,b)=>b.s-a.s)
+    .slice(0,10)
+    .map(o=>items.get(revItemIdx[o.i])?.title||('#'+revItemIdx[o.i]));
+
+  renderComparison(hist, ranked);
 }
-document.getElementById('testBtn').onclick = testModel;
+
+function renderComparison(hist, recs) {
+  let html = '<table><tr><th>Top-10 Rated</th><th>Top-10 Recommended</th></tr>';
+  for (let i=0;i<10;i++) {
+    html += `<tr><td>${hist[i]||''}</td><td>${recs[i]||''}</td></tr>`;
+  }
+  html += '</table>';
+  resultDiv.innerHTML = html;
+}
+
+// === EMBEDDING VISUALIZATION ===
+function drawEmbeddingProjection() {
+  const ctx = embedCanvas.getContext('2d');
+  ctx.clearRect(0,0,embedCanvas.width,embedCanvas.height);
+
+  const emb = model.itemEmbedding.arraySync(); // shape [n, embDim]
+  const n = emb.length;
+  const dim = emb[0].length;
+
+  // Simple PCA on covariance
+  const means = Array(dim).fill(0);
+  for (let i=0;i<n;i++) for (let d=0;d<dim;d++) means[d]+=emb[i][d];
+  for (let d=0;d<dim;d++) means[d]/=n;
+  const X = emb.map(row => row.map((v,d)=>v-means[d]));
+  const cov = tf.matMul(tf.tensor2d(X), tf.tensor2d(X), true, false).div(n);
+  const { eigVals, eigVecs } = tf.linalg.eigh(cov);
+  const idxs = eigVals.arraySync().map((v,i)=>[v,i]).sort((a,b)=>b[0]-a[0]).map(x=>x[1]);
+  const W = tf.gather(eigVecs, tf.tensor1d(idxs.slice(0,2),'int32'), 1);
+  const proj = tf.matMul(tf.tensor2d(X), W).arraySync();
+
+  const xs = proj.map(p=>p[0]), ys = proj.map(p=>p[1]);
+  const minX=Math.min(...xs), maxX=Math.max(...xs);
+  const minY=Math.min(...ys), maxY=Math.max(...ys);
+  ctx.fillStyle='steelblue';
+  for (let i=0;i<n;i+=Math.floor(n/1000)+1) {
+    const x=((xs[i]-minX)/(maxX-minX))*embedCanvas.width;
+    const y=((ys[i]-minY)/(maxY-minY))*embedCanvas.height;
+    ctx.fillRect(x,y,2,2);
+  }
+}
