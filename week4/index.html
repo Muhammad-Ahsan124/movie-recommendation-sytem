@@ -1,57 +1,52 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<title>Two-Tower + Deep (MLP) Retrieval — MovieLens 100K (TF.js)</title>
-<style>
-body { font-family: Arial, sans-serif; margin: 20px; }
-button { margin: 5px; padding: 8px 16px; }
-canvas { border: 1px solid #ccc; margin-top: 10px; }
-table { border-collapse: collapse; margin-top: 10px; }
-td, th { border: 1px solid #ccc; padding: 6px 10px; }
-</style>
+  <meta charset="UTF-8" />
+  <title>Two-Tower Retrieval demo (TF.js) — MovieLens 100K</title>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.10.0/dist/tf.min.js"></script>
+  <script src="two-tower.js"></script>
+  <script src="app.js"></script>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; }
+    button { margin: 5px; padding: 6px 12px; }
+    #status { margin-top: 10px; padding: 10px; background: #f5f5f5; border-radius: 4px; }
+    canvas { border: 1px solid #ccc; margin-top: 10px; }
+    table { border-collapse: collapse; margin-top: 10px; width: 100%; }
+    td, th { border: 1px solid #aaa; padding: 4px; text-align: left; }
+  </style>
 </head>
 <body>
-<h3>Two-Tower + Deep (MLP) Retrieval — MovieLens 100K (TF.js)</h3>
+  <h2>Two-Tower Retrieval demo (TF.js) — MovieLens 100K</h2>
+  <p>
+    Client-only demo for GitHub Pages.<br>
+    Click <b>Load Data</b>, then <b>Train</b>. After training, click <b>Test</b> to compare historical vs recommendations.
+  </p>
 
-<div>
-  <button id="loadBtn">Load Data</button>
-  <button id="trainBtn">Train</button>
-  <button id="testBtn">Test</button>
-  embeddingDim: <input id="embDim" value="32" size="3">
-  epochs: <input id="epochs" value="5" size="3">
-  batch: <input id="batch" value="128" size="3">
-  maxInteractions: <input id="maxInt" value="80000" size="6">
-  <span id="status"></span>
-</div>
-<p>Tips: Place files under <code>/data/u.data</code> and <code>/data/u.item</code> — works with GitHub Pages.</p>
-
-<div style="display:flex; flex-wrap:wrap;">
-  <div style="flex:1; min-width:300px;">
-    <h4>Training / Loss</h4>
-    <canvas id="lossChart" width="400" height="200"></canvas>
+  <div>
+    <button id="loadDataBtn">Load Data</button>
+    <button id="trainBtn" disabled>Train</button>
+    <button id="testBtn" disabled>Test</button>
+    <input id="maxInteractions" type="number" value="80000" style="width:90px" />
+    <label>Max interactions</label>
+    <input id="embDim" type="number" value="32" style="width:50px" />
+    <label>Emb dim</label>
+    <input id="epochs" type="number" value="5" style="width:40px" />
+    <label>Epochs</label>
+    <input id="batchSize" type="number" value="512" style="width:60px" />
+    <label>Batch</label>
+    <input id="lr" type="number" value="0.01" step="0.001" style="width:60px" />
+    <label>LR</label>
   </div>
-  <div style="flex:1; min-width:300px;">
-    <h4>Results — Test (Side-by-side)</h4>
-    <p>Press Test after training to see comparison tables.</p>
-    <div>
-      <label><input type="checkbox" id="useBPR"> Use BPR loss</label><br>
-      <label><input type="checkbox" id="useGenres" checked> Use genres as item features (Deep)</label><br>
-      <label><input type="checkbox" id="useUserFeat" checked> Use synthesized user features (Deep)</label><br>
-      <label><input type="checkbox" id="useDeep" checked> Train Deep (MLP) model in addition to Two-Tower</label>
-    </div>
-  </div>
-</div>
 
-<div>
-  <h4>Embedding Projection (sampled items)</h4>
-  <canvas id="projCanvas" width="600" height="400"></canvas>
-</div>
+  <div id="status">Waiting for user action...</div>
 
-<div id="resultsTable"></div>
+  <h4>Live loss</h4>
+  <canvas id="lossChart" width="600" height="200"></canvas>
 
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0"></script>
-<script src="two-tower.js"></script>
-<script src="app.js"></script>
+  <h4>Item embedding projection (2D)</h4>
+  <canvas id="embedCanvas" width="600" height="400"></canvas>
+
+  <h4>Top-10 Rated vs Top-10 Recommended</h4>
+  <div id="results"></div>
 </body>
 </html>
