@@ -1,452 +1,505 @@
 // app.js
-// Glue: data loading, batching, UI, training loop, projection, test UI
-// Depends on two-tower.js (TwoTowerModel) and tf.js
+// Main application logic with robust data-loading fallback (tries multiple relative paths and local file upload if hosted files are missing).
+// Depends on two-tower.js which exposes TwoTowerModel and DeepRecModel classes.
 
-// Globals
-let interactions = []; // {userId, itemId, rating, ts}
-let items = new Map(); // itemId -> {title, year, genres: [0/1 array]}
-let usersToItems = new Map(); // userId -> [{itemId, rating, ts}]
-let userIdToIndex = {}, itemIdToIndex = {}, indexToUserId = [], indexToItemId = [];
-let numUsers=0, numItems=0;
-let genreDim = 19;
-let model = null;
-let genreMatrix = null; // array of arrays [numItems][genreDim]
-let logEl, statusEl;
-let lossHistory = [];
+(async () => {
+  // DOM elements
+  const btnLoad = document.getElementById('btnLoad');
+  const btnTrain = document.getElementById('btnTrain');
+  const btnTest = document.getElementById('btnTest');
+  const status = document.getElementById('status');
+  const lossCanvas = document.getElementById('lossCanvas');
+  const projCanvas = document.getElementById('projCanvas');
+  const progressDiv = document.getElementById('progress');
+  const tableArea = document.getElementById('tableArea');
+  const tooltip = document.getElementById('tooltip');
+  const fileUdata = document.getElementById('fileUdata');
+  const fileUitem = document.getElementById('fileUitem');
 
-// UI bindings
-document.addEventListener('DOMContentLoaded', ()=> {
-  logEl = document.getElementById('log');
-  statusEl = document.getElementById('status');
-  document.getElementById('btn-load').onclick = loadData;
-  document.getElementById('btn-train').onclick = trainHandler;
-  document.getElementById('btn-test').onclick = testHandler;
-  document.getElementById('btn-clear-log').onclick = ()=>{ logEl.textContent=''; };
-  drawLossChart(); // initialize
-});
+  const inputEmbDim = document.getElementById('inputEmbDim');
+  const inputEpochs = document.getElementById('inputEpochs');
+  const inputBatch = document.getElementById('inputBatch');
+  const inputMaxInt = document.getElementById('inputMaxInt');
 
-// UTIL: log message
-function log(msg){
-  const t = new Date().toLocaleTimeString();
-  logEl.textContent += `[${t}] ${msg}\n`;
-  logEl.scrollTop = logEl.scrollHeight;
-}
+  const optBPR = document.getElementById('optBPR');
+  const optUseGenres = document.getElementById('optUseGenres');
+  const optUseUserFeat = document.getElementById('optUseUserFeat');
+  const optIncludeDL = document.getElementById('optIncludeDL');
 
-// ----------- DATA LOADING -------------
-async function loadData(){
-  try {
-    statusEl.innerText = "Loading data...";
-    log("Fetching /data/u.item and /data/u.data ...");
-    // fetch items
-    const itemResp = await fetch('data/u.item');
-    if(!itemResp.ok) throw new Error("Failed to fetch data/u.item");
-    const itemText = await itemResp.text();
-    parseItems(itemText);
+  // Canvas contexts
+  const lossCtx = lossCanvas.getContext('2d');
+  const projCtx = projCanvas.getContext('2d');
 
-    const dataResp = await fetch('data/u.data');
-    if(!dataResp.ok) throw new Error("Failed to fetch data/u.data");
-    const dataText = await dataResp.text();
-    parseInteractions(dataText);
+  // App state
+  let interactions = []; // {userId, itemId, rating, ts}
+  let items = new Map(); // itemId -> {title, year, genres: [0/1..]}
+  let usersMap = new Map(); // internal userIdx -> [{itemIdx, rating, ts}]
+  let userIndex = new Map(); // original userId -> 0-based idx
+  let itemIndex = new Map(); // original itemId -> 0-based idx
+  let indexUser = []; // reverse: internal -> original id
+  let indexItem = []; // internal -> original item id
+  let numUsers = 0, numItems = 0;
 
-    buildIndexers();
-    buildGenreMatrix();
+  let twoTower = null;
+  let deepModel = null;
 
-    populateSampleRow();
-    populateConfigDropdowns();
+  let itemEmbeddingSample2D = []; // for plotting
 
-    statusEl.innerText = `Loaded ${interactions.length} interactions, ${numUsers} users, ${numItems} items. Ready.`;
-    log(`Loaded interactions=${interactions.length}, users=${numUsers}, items=${numItems}`);
-    document.getElementById('btn-train').disabled = false;
-  } catch (err) {
-    statusEl.innerText = "Load failed: " + err.message;
-    log("Error: " + err.stack || err);
-    console.error(err);
-  }
-}
+  // Helpers
+  function setStatus(s) { status.innerText = s; }
+  function setProgress(s) { progressDiv.innerText = s; }
+  function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-function parseItems(text){
-  items = new Map();
-  const genreNames = [
-    "Unknown","Action","Adventure","Animation","Children's","Comedy","Crime","Documentary","Drama","Fantasy",
-    "Film-Noir","Horror","Musical","Mystery","Romance","Sci-Fi","Thriller","War","Western"
-  ];
-  const lines = text.split('\n');
-  for (const line of lines) {
-    if (!line.trim()) continue;
-    const parts = line.split('|');
-    if (parts.length < 2) continue;
-    const id = parseInt(parts[0],10);
-    let title = parts[1];
-    // attempt to extract year from title "Movie (1995)"
-    let year = null;
-    const m = title.match(/\((\d{4})\)/);
-    if (m) { year = parseInt(m[1],10); }
-    // genre flags are last 19 fields
-    const flags = parts.slice(-19);
-    const genres = flags.map(f => f === '1' ? 1 : 0);
-    items.set(id, {id, title, year, genres});
-  }
-}
-
-function parseInteractions(text){
-  interactions = [];
-  usersToItems = new Map();
-  const lines = text.split('\n');
-  for (const line of lines) {
-    if (!line.trim()) continue;
-    const p = line.split('\t');
-    if (p.length < 3) continue;
-    const userId = parseInt(p[0],10);
-    const itemId = parseInt(p[1],10);
-    const rating = parseFloat(p[2]);
-    const ts = p[3] ? parseInt(p[3],10) : 0;
-    interactions.push({userId, itemId, rating, ts});
-    if (!usersToItems.has(userId)) usersToItems.set(userId, []);
-    usersToItems.get(userId).push({itemId, rating, ts});
-  }
-}
-
-// build index maps (0-based) using users/items present
-function buildIndexers(){
-  // users from interactions
-  const userSet = new Set(interactions.map(r=>r.userId));
-  const itemSet = new Set(interactions.map(r=>r.itemId));
-  // ensure items in items map also included
-  for (const k of items.keys()) itemSet.add(k);
-
-  indexToUserId = Array.from(userSet).sort((a,b)=>a-b);
-  indexToItemId = Array.from(itemSet).sort((a,b)=>a-b);
-  userIdToIndex = {}; itemIdToIndex = {};
-  indexToUserId.forEach((u,i)=> userIdToIndex[u]=i);
-  indexToItemId.forEach((m,i)=> itemIdToIndex[m]=i);
-  numUsers = indexToUserId.length;
-  numItems = indexToItemId.length;
-}
-
-function buildGenreMatrix(){
-  genreMatrix = new Array(numItems);
-  for (let i=0;i<numItems;i++){
-    const origId = indexToItemId[i];
-    const rec = items.get(origId);
-    if (rec && rec.genres) genreMatrix[i] = rec.genres.slice(0, genreDim).map(x=> x?1:0);
-    else genreMatrix[i] = new Array(genreDim).fill(0);
-  }
-}
-
-// populate sample row visuals
-function populateSampleRow(){
-  const row = document.getElementById('sample-row'); row.innerHTML='';
-  const sample = indexToItemId.slice(0,20);
-  for (const mid of sample){
-    const it = items.get(mid);
-    const card = document.createElement('div'); card.className='movie-card';
-    card.style.minWidth='130px';
-    card.style.marginRight='8px';
-    const img = document.createElement('img'); img.src=`https://picsum.photos/200/260?random=${mid}`; img.style.width='100%';
-    const div = document.createElement('div'); div.className='movie-info';
-    const h = document.createElement('h4'); h.textContent = it ? it.title : `#${mid}`;
-    div.appendChild(h);
-    card.appendChild(img); card.appendChild(div);
-    row.appendChild(card);
-  }
-}
-
-// populate some config UIs (if needed)
-function populateConfigDropdowns(){
-  // nothing for now; placeholder if future UI needs
-}
-
-// ----------- TRAINING / BATCHING -------------
-function buildBatches(maxInteractions){
-  // Shuffle interactions, limit to maxInteractions
-  const maxN = Math.min(maxInteractions || 80000, interactions.length);
-  const arr = interactions.slice(0, maxN);
-  // shuffle
-  for (let i=arr.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [arr[i],arr[j]]=[arr[j],arr[i]]; }
-  // map to indices
-  const userIdx = arr.map(r=> userIdToIndex[r.userId]);
-  const itemIdx = arr.map(r=> itemIdToIndex[r.itemId]);
-  const ratingsArr = arr.map(r=> r.rating);
-  // return arrays
-  return {userIdx, itemIdx, ratings: ratingsArr};
-}
-
-// Higher-level train handler
-async function trainHandler(){
-  try {
-    document.getElementById('btn-train').disabled = true;
-    const maxI = parseInt(document.getElementById('cfg-max').value || '80000',10);
-    const embDim = parseInt(document.getElementById('cfg-dim').value || '32',10);
-    const epochs = parseInt(document.getElementById('cfg-epochs').value || '6',10);
-    const bsz = parseInt(document.getElementById('cfg-bsz').value || '256',10);
-    const lossType = document.getElementById('cfg-loss').value || 'inbatch';
-    const useMLP = document.getElementById('cfg-mlp').checked;
-
-    statusEl.innerText = 'Preparing batches...';
-    log(`Training config: maxI=${maxI}, embDim=${embDim}, epochs=${epochs}, bsz=${bsz}, loss=${lossType}, MLP=${useMLP}`);
-
-    const {userIdx, itemIdx} = buildBatches(maxI);
-
-    // Build array of batches (simple segmentation)
-    const N = userIdx.length;
-    const batches = [];
-    for (let i=0;i<N;i+=bsz){
-      const j = Math.min(N, i+bsz);
-      batches.push({
-        userIdx: userIdx.slice(i,j),
-        posIdx: itemIdx.slice(i,j)
-      });
+  // Simple loss plot
+  function plotLoss(lossHistory) {
+    const ctx = lossCtx;
+    const w = lossCanvas.width;
+    const h = lossCanvas.height;
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0,0,w,h);
+    if (lossHistory.length === 0) {
+      ctx.fillStyle = '#666';
+      ctx.fillText('No loss yet', 8, 20);
+      return;
     }
-    log(`Built ${batches.length} batches (${N} interactions)`);
+    const pad = 32;
+    const max = Math.max(...lossHistory);
+    const min = Math.min(...lossHistory);
+    ctx.strokeStyle = '#2b7';
+    ctx.beginPath();
+    for (let i=0;i<lossHistory.length;i++) {
+      const x = pad + (i/(lossHistory.length-1))*(w-2*pad);
+      const v = lossHistory[i];
+      const y = h - pad - ((v-min)/(max-min+1e-9))*(h-2*pad);
+      if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+    }
+    ctx.stroke();
+    ctx.fillStyle = '#333';
+    ctx.fillText(`loss (min ${min.toFixed(4)} max ${max.toFixed(4)})`, 8, 12);
+  }
 
-    // Create model
-    model = new TwoTowerModel({
-      numUsers, numItems, embDim, useMLP, genreDim, lr:0.001, lossType
+  // PCA approx (power iteration)
+  async function computePCA2D(tensorX, iterations=30) {
+    return tf.tidy(() => {
+      const mean = tensorX.mean(0);
+      let X = tensorX.sub(mean);
+      const n = X.shape[0];
+      const C = X.transpose().matMul(X).div(n);
+      function powerIter(Cmat) {
+        let v = tf.randomNormal([Cmat.shape[1], 1]);
+        for (let i=0;i<iterations;i++) {
+          v = Cmat.matMul(v);
+          const norm = v.norm();
+          v = v.div(norm.add(1e-9));
+        }
+        const eigenvec = v.reshape([Cmat.shape[1]]);
+        const eigenval = tf.squeeze(tf.matMul(tf.matMul(eigenvec.expandDims(0), Cmat), eigenvec.expandDims(1)));
+        return {eigenvec, eigenval};
+      }
+      const {eigenvec: v1, eigenval: l1} = powerIter(C);
+      const v1col = v1.reshape([v1.shape[0],1]);
+      const C2 = C.sub(v1col.matMul(v1col.transpose()).mul(l1));
+      const {eigenvec: v2} = powerIter(C2);
+      const P = tf.stack([v1, v2], 1);
+      const proj = X.matMul(P);
+      return {proj, mean, pcs: P};
     });
+  }
 
-    // UI: enable Test only after training finishes
-    document.getElementById('btn-test').disabled = true;
-    lossHistory = [];
-    drawLossChart();
-
-    // Training loop
-    for (let e=0;e<epochs;e++){
-      let epochLoss = 0;
-      let count = 0;
-      statusEl.innerText = `Training epoch ${e+1}/${epochs} ...`;
-      for (let b=0;b<batches.length;b++){
-        const batch = batches[b];
-        // prepare genre features for positives if MLP used
-        let genrePos = null;
-        if (useMLP){
-          genrePos = batch.posIdx.map(pi => genreMatrix[pi]);
-        }
-        // For BPR, sample negatives per positive
-        let negIdx = null;
-        if (lossType === 'bpr'){
-          negIdx = batch.posIdx.map(()=> Math.floor(Math.random()*numItems));
-        }
-
-        const loss = await model.trainStep({userIdx: batch.userIdx, posIdx: batch.posIdx, negIdx}, {genrePos, genreDim});
-        epochLoss += loss; count++;
-        lossHistory.push({x: e + b/batches.length, y: loss});
-        if ((b % Math.max(1,Math.floor(batches.length/6)))===0) {
-          drawLossChart();
-          log(`Epoch ${e+1} batch ${b+1}/${batches.length} loss=${loss.toFixed(4)}`);
-          statusEl.innerText = `Epoch ${e+1}/${epochs} — batch ${b+1}/${batches.length} — loss ${loss.toFixed(4)}`;
-          await tf.nextFrame();
-        }
+  // Draw projection scatter
+  function drawProjection(points) {
+    const ctx = projCtx;
+    const W = projCanvas.width, H = projCanvas.height;
+    ctx.clearRect(0,0,W,H);
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0,0,W,H);
+    if (!points || points.length===0) {
+      ctx.fillStyle = '#666'; ctx.fillText('No projection', 16, 24); return;
+    }
+    const xs = points.map(p=>p.x), ys = points.map(p=>p.y);
+    const minx = Math.min(...xs), maxx = Math.max(...xs);
+    const miny = Math.min(...ys), maxy = Math.max(...ys);
+    const pad = 24;
+    for (let p of points) {
+      const cx = pad + ((p.x - minx)/(maxx - minx + 1e-9))*(W-2*pad);
+      const cy = pad + ((p.y - miny)/(maxy - miny + 1e-9))*(H-2*pad);
+      p.canvasX = cx; p.canvasY = cy;
+      ctx.beginPath(); ctx.arc(cx, cy, 3, 0, Math.PI*2); ctx.fillStyle = '#1565c0'; ctx.fill();
+    }
+    projCanvas.onmousemove = (ev) => {
+      const r = projCanvas.getBoundingClientRect();
+      const mx = ev.clientX - r.left, my = ev.clientY - r.top;
+      let nearest = null, nd = 20;
+      for (let p of points) {
+        const d = Math.hypot(p.canvasX - mx, p.canvasY - my);
+        if (d < nd) { nearest = p; nd = d; }
       }
-      const avg = epochLoss/count;
-      log(`Epoch ${e+1} completed. avg loss=${avg.toFixed(4)}`);
-      drawLossChart();
+      if (nearest) {
+        tooltip.style.display = 'block';
+        tooltip.style.left = (ev.clientX + 10) + 'px';
+        tooltip.style.top = (ev.clientY + 10) + 'px';
+        tooltip.innerText = `${nearest.title}`;
+      } else tooltip.style.display = 'none';
+    };
+    projCanvas.onmouseleave = () => tooltip.style.display = 'none';
+  }
+
+  // Parse functions
+  function parseItemLine(line) {
+    const parts = line.split('|');
+    if (parts.length < 2) return null;
+    const id = parseInt(parts[0], 10);
+    const rawTitle = parts[1];
+    let year = null;
+    const m = rawTitle.match(/\((\d{4})\)$/);
+    if (m) year = parseInt(m[1], 10);
+    const genreFlags = parts.slice(5).map(x => parseInt(x || '0', 10));
+    return {id, title: rawTitle, year, genres: genreFlags};
+  }
+  function parseDataLine(line) {
+    const parts = line.trim().split('\t');
+    if (parts.length < 4) return null;
+    return {
+      userId: parseInt(parts[0],10),
+      itemId: parseInt(parts[1],10),
+      rating: parseInt(parts[2],10),
+      ts: parseInt(parts[3],10)
+    };
+  }
+
+  // Build indexing and usersMap
+  function buildIndexing(maxInteractions) {
+    const uSet = new Set(), iSet = new Set();
+    const interactionsTrim = interactions.slice(0, maxInteractions);
+    for (const it of interactionsTrim) { uSet.add(it.userId); iSet.add(it.itemId); }
+    indexUser = Array.from(uSet).sort((a,b)=>a-b);
+    indexItem = Array.from(iSet).sort((a,b)=>a-b);
+    userIndex = new Map(indexUser.map((v,i)=>[v,i]));
+    itemIndex = new Map(indexItem.map((v,i)=>[v,i]));
+    numUsers = indexUser.length; numItems = indexItem.length;
+
+    usersMap = new Map();
+    for (const it of interactionsTrim) {
+      const u0 = userIndex.get(it.userId);
+      const i0 = itemIndex.get(it.itemId);
+      if (u0==null || i0==null) continue;
+      if (!usersMap.has(u0)) usersMap.set(u0, []);
+      usersMap.get(u0).push({itemIdx: i0, rating: it.rating, ts: it.ts});
+    }
+    for (const [u, arr] of usersMap) arr.sort((a,b)=>b.ts - a.ts);
+  }
+
+  function getUserTopRatedTitles(uIdx, limit=10) {
+    const arr = usersMap.get(uIdx) || [];
+    const copy = arr.slice().sort((a,b) => {
+      if (b.rating !== a.rating) return b.rating - a.rating;
+      return b.ts - a.ts;
+    });
+    const top = copy.slice(0, limit).map(x => {
+      const origId = indexItem[x.itemIdx];
+      const it = items.get(origId);
+      return {title: it ? it.title : String(origId), itemIdx: x.itemIdx};
+    });
+    return top;
+  }
+
+  function buildPosPairs() {
+    const pairs = [];
+    for (const [uIdx, arr] of usersMap) {
+      for (const r of arr) pairs.push([uIdx, r.itemIdx]);
+    }
+    return pairs;
+  }
+
+  // Read a File object as text (Promise)
+  function readFileAsText(file) {
+    return new Promise((res, rej) => {
+      const fr = new FileReader();
+      fr.onload = () => res(fr.result);
+      fr.onerror = (e) => rej(e);
+      fr.readAsText(file);
+    });
+  }
+
+  // Try fetch a list of candidate relative URLs for a single filename
+  async function tryFetchCandidates(candidates) {
+    for (const p of candidates) {
+      try {
+        const r = await fetch(p);
+        if (r.ok) {
+          const txt = await r.text();
+          return {path: p, text: txt};
+        }
+      } catch (e) {
+        // ignore and try next
+      }
+    }
+    return null;
+  }
+
+  // Unified loader that tries hosted paths, then falls back to uploaded files
+  async function loadDataFiles() {
+    setStatus('attempting to load data from known paths...');
+    const attempts = [];
+    // Candidate relative paths (cover common cases)
+    const dataCandidates = ['data/u.data', './data/u.data', 'data/u.data.txt', './data/u.data.txt', '/data/u.data'];
+    const itemCandidates = ['data/u.item', './data/u.item', 'data/u.item.txt', './data/u.item.txt', '/data/u.item'];
+
+    const [gotData, gotItem] = await Promise.all([
+      tryFetchCandidates(dataCandidates),
+      tryFetchCandidates(itemCandidates)
+    ]);
+
+    // accumulate attempted paths for user info
+    attempts.push({type:'u.data', tried: dataCandidates, found: gotData ? gotData.path : null});
+    attempts.push({type:'u.item', tried: itemCandidates, found: gotItem ? gotItem.path : null});
+
+    // If any missing, try uploaded files
+    let rawData = gotData ? gotData.text : null;
+    let rawItem = gotItem ? gotItem.text : null;
+
+    if (!rawData && fileUdata.files && fileUdata.files[0]) {
+      rawData = await readFileAsText(fileUdata.files[0]);
+      attempts.push({type:'u.data', tried:'local upload', found: fileUdata.files[0].name});
+    }
+    if (!rawItem && fileUitem.files && fileUitem.files[0]) {
+      rawItem = await readFileAsText(fileUitem.files[0]);
+      attempts.push({type:'u.item', tried:'local upload', found: fileUitem.files[0].name});
     }
 
-    statusEl.innerText = "Training complete.";
-    document.getElementById('btn-test').disabled = false;
-    log('Training finished. Preparing embedding projection...');
-    await projectAndDraw(); // projection after training
-  } catch (err) {
-    statusEl.innerText = 'Training error: ' + err.message;
-    log('Error during training: ' + (err.stack || err));
-    console.error(err);
-  } finally {
-    document.getElementById('btn-train').disabled = false;
+    return {rawData, rawItem, attempts};
   }
-}
 
-// ----------- PREDICTION / TEST -------------
-async function testHandler(){
-  if (!model) { statusEl.innerText='Model not ready.'; return; }
-  statusEl.innerText = 'Selecting random user with >=20 ratings...';
-  // choose qualified users
-  const qualified = [];
-  for (const [u, arr] of usersToItems.entries()){
-    if (arr.length >= 20) qualified.push(u);
-  }
-  if (qualified.length===0){ statusEl.innerText='No user with >=20 ratings found.'; return; }
-  const userId = qualified[Math.floor(Math.random()*qualified.length)];
-  const userIdx = userIdToIndex[userId];
-
-  // Left: top-10 historically rated movies by rating then recency
-  const hist = usersToItems.get(userId).slice();
-  hist.sort((a,b)=> b.rating - a.rating || b.ts - a.ts);
-  const topHist = hist.slice(0,20).map(h => ({itemId:h.itemId, rating:h.rating, ts:h.ts}));
-
-  // Right: compute scores for all items and take top-10 excluding already rated
-  statusEl.innerText = 'Computing recommendations (this may take a moment)...';
-  log(`Computing scores for user ${userId} (idx ${userIdx})`);
-  // model.scoresForUserIndex returns Float32Array scores
-  const scores = await model.scoresForUserIndex(userIdx, genreMatrix, 1024);
-  const ratedSet = new Set(usersToItems.get(userId).map(x=>x.itemId));
-  const scoredList = [];
-  for (let i=0;i<scores.length;i++){
-    const origId = indexToItemId[i];
-    if (ratedSet.has(origId)) continue;
-    scoredList.push({itemIndex:i, score: scores[i]});
-  }
-  scoredList.sort((a,b)=> b.score - a.score);
-  const topRec = scoredList.slice(0,10).map(s=> ({itemId: indexToItemId[s.itemIndex], score:s.score}));
-
-  // Optional DL comparison: here our model already includes MLP if selected; for comparison we can compute
-  // baseline dot-product using raw embeddings (without MLP) to compare. We'll compute top-10 baseline.
-  const baselineScores = await baselineScoresForUser(userIdx);
-  const baselineList = [];
-  for (let i=0;i<baselineScores.length;i++){
-    const origId = indexToItemId[i];
-    if (ratedSet.has(origId)) continue;
-    baselineList.push({itemIndex:i, score: baselineScores[i]});
-  }
-  baselineList.sort((a,b)=> b.score - a.score);
-  const topBaseline = baselineList.slice(0,10).map(s=> ({itemId: indexToItemId[s.itemIndex], score:s.score}));
-
-  // Render side-by-side table: left historic top 10, middle model recs, right baseline or DL comparison
-  renderComparisonTable(topHist.slice(0,10), topRec, topBaseline);
-  statusEl.innerText = `Test completed for user ${userId}.`;
-}
-
-async function baselineScoresForUser(userIdx){
-  // compute simple dot using embedding matrices (no MLP)
-  // user embedding
-  const uIdxT = tf.tensor1d([userIdx],'int32');
-  const uEmb = model.userForward(uIdxT); // [1,d]
-  const itemEmbAll = model.itemEmb; // tf.variable [numItems,d]
-  const logits = tf.matMul(uEmb, itemEmbAll, false, true); // [1, numItems]
-  const arr = await logits.data();
-  uIdxT.dispose(); uEmb.dispose(); logits.dispose();
-  return Array.from(arr);
-}
-
-function renderComparisonTable(histList, recList, baselineList){
-  const wrap = document.getElementById('tables-wrap'); wrap.innerHTML = '';
-  const tbl = document.createElement('table');
-  const header = document.createElement('tr');
-  header.innerHTML = `<th>Top-10 Historically Rated</th><th>Model Recommendations (DL)</th><th>Baseline (Dot Only)</th>`;
-  tbl.appendChild(header);
-  for (let i=0;i<10;i++){
-    const tr = document.createElement('tr');
-    const left = histList[i] ? items.get(histList[i].itemId).title + ` (${histList[i].rating})` : '';
-    const mid = recList[i] ? items.get(recList[i].itemId).title + ` (${recList[i].score.toFixed(2)})` : '';
-    const right = baselineList[i] ? items.get(baselineList[i].itemId).title + ` (${baselineList[i].score.toFixed(2)})` : '';
-    tr.innerHTML = `<td>${escapeHtml(left)}</td><td>${escapeHtml(mid)}</td><td>${escapeHtml(right)}</td>`;
-    tbl.appendChild(tr);
-  }
-  wrap.appendChild(tbl);
-}
-
-// ----------- PROJECTION (PCA) -------------
-async function projectAndDraw(){
-  statusEl.innerText = 'Projecting item embeddings (PCA) for visualization...';
-  // sample up to 1000 items
-  const sampleN = Math.min(1000, numItems);
-  const indices = [];
-  // sample uniformly
-  for (let i=0;i<sampleN;i++) indices.push(Math.floor(i*(numItems/sampleN)));
-  // build item embedding matrix for these indices (apply MLP processing if used)
-  // We'll gather embeddings via model.itemForward for a batch of indices
-  const idxT = tf.tensor1d(indices,'int32');
-  let itemEmb;
-  if (model.useMLP){
-    // need genre features slice
-    const genreSlice = indices.map(i=> genreMatrix[i]);
-    const genreT = tf.tensor2d(genreSlice);
-    itemEmb = model.itemForward(idxT, genreT); // [sampleN, d]
-    genreT.dispose();
-  } else {
-    itemEmb = model.itemForward(idxT, null); // [sampleN,d]
-  }
-  // Perform SVD on centered embeddings (X = U S V^T). We'll use tf.svd
-  const mean = itemEmb.mean(0);
-  const centered = itemEmb.sub(mean);
-  // compute SVD (tf.svd exists in tfjs). fallback: use simple power iteration on covariance if not available.
-  let U, S, V;
-  try {
-    const svdRes = tf.svd(centered, true);
-    U = svdRes.u; S = svdRes.s; V = svdRes.v;
-    // project: scores = centered @ V[:,0:2]
-    const V2 = V.slice([0,0],[V.shape[0],2]); // [d,2]
-    const proj = tf.matMul(centered, V2); // [sampleN,2]
-    const arr = await proj.array();
-    drawProjection(indices, arr);
-    proj.dispose(); V2.dispose(); U.dispose(); S.dispose(); V.dispose();
-  } catch (err){
-    // fallback to simple PCA via covariance eigenvectors computed with power iteration on covariance matrix (dxd)
-    log('SVD not available; using fallback PCA (may be slower).');
-    const X = centered; // [n,d]
-    const Xt = X.transpose(); // [d,n]
-    const cov = tf.matMul(Xt, X).div(sampleN-1); // [d,d]
-    // power iteration to find top 2 eigenvectors
-    const d = cov.shape[0];
-    let eigs = [];
-    let covT = cov;
-    for (let k=0;k<2;k++){
-      let v = tf.randomNormal([d,1]);
-      for (let iter=0;iter<60;iter++){
-        v = tf.matMul(covT, v);
-        const norm = v.norm();
-        v = v.div(norm);
+  // UI: Load button handler
+  btnLoad.onclick = async () => {
+    setStatus('loading data...');
+    try {
+      const maxInt = parseInt(inputMaxInt.value,10) || 80000;
+      const {rawData, rawItem, attempts} = await loadDataFiles();
+      // Display info about attempts if something missing
+      if (!rawData || !rawItem) {
+        const msgParts = [];
+        if (!rawData) msgParts.push('u.data not found');
+        if (!rawItem) msgParts.push('u.item not found');
+        setStatus('error loading data: ' + msgParts.join(', ') + '. Use the file inputs to upload files or ensure /data/u.data and /data/u.item exist in your repo.');
+        console.warn('Load attempts:', attempts);
+        return;
       }
-      eigs.push(v.reshape([d]));
-      // deflate
-      const lambda = tf.dot(v.reshape([d]), tf.matMul(covT, v).reshape([d]));
-      covT = covT.sub(tf.matMul(v, v.transpose()).mul(lambda));
+
+      // parse items
+      items.clear();
+      rawItem.split('\n').forEach(line => {
+        if (!line.trim()) return;
+        const parsed = parseItemLine(line);
+        if (!parsed) return;
+        items.set(parsed.id, {title: parsed.title, year: parsed.year, genres: parsed.genres});
+      });
+
+      // parse interactions
+      interactions = [];
+      rawData.split('\n').forEach(line => {
+        if (!line.trim()) return;
+        const p = parseDataLine(line);
+        if (!p) return;
+        interactions.push(p);
+      });
+      interactions.sort((a,b)=>a.ts - b.ts);
+
+      buildIndexing(maxInt);
+
+      setStatus(`loaded: interactions=${interactions.length} users=${numUsers} items=${numItems}`);
+      btnTrain.disabled = false;
+      btnTest.disabled = true;
+    } catch (e) {
+      console.error(e);
+      setStatus('error loading data: ' + String(e));
+      btnTrain.disabled = true;
+      btnTest.disabled = true;
     }
-    const Vmat = tf.stack(eigs,1); // [d,2]
-    const proj = tf.matMul(centered, Vmat); // [n,2]
-    const arr = await proj.array();
-    drawProjection(indices, arr);
-    proj.dispose(); cov.dispose(); Xt.dispose();
+  };
+
+  // Training handler
+  btnTrain.onclick = async () => {
+    try {
+      btnTrain.disabled = true; btnLoad.disabled = true; btnTest.disabled = true;
+      setStatus('initializing models...');
+      const embDim = parseInt(inputEmbDim.value,10) || 32;
+      const epochs = parseInt(inputEpochs.value,10) || 5;
+      const batchSize = parseInt(inputBatch.value,10) || 128;
+      const maxInt = parseInt(inputMaxInt.value,10) || 80000;
+      const useBPR = optBPR.checked;
+      const useGenres = optUseGenres.checked;
+      const useUserFeat = optUseUserFeat.checked;
+      const includeDL = optIncludeDL.checked;
+
+      buildIndexing(maxInt);
+
+      twoTower = new TwoTowerModel(numUsers, numItems, embDim);
+
+      if (includeDL) {
+        // synthesize user features
+        const userFeat = new Array(numUsers).fill(0).map(()=>[0,0]);
+        for (let u=0; u<numUsers; u++) {
+          const arr = usersMap.get(u) || [];
+          if (arr.length===0) userFeat[u] = [0,0];
+          else {
+            const avg = arr.reduce((s,x)=>s+x.rating,0)/arr.length;
+            userFeat[u] = [avg/5.0, Math.log1p(arr.length)/Math.log(1+50)];
+          }
+        }
+        deepModel = new DeepRecModel({
+          numUsers, numItems, embDim,
+          useGenres, useUserFeat,
+          itemMeta: items,
+          userFeatArray: userFeat
+        });
+
+        // Prepare internal item->genre mapping aligned to internal indices
+        const genreDim = (items.size>0) ? (Array.from(items.values())[0].genres ? Array.from(items.values())[0].genres.length : 0) : 0;
+        const arrGenres = new Array(numItems);
+        for (let i=0;i<numItems;i++) {
+          const origId = indexItem[i];
+          const it = items.get(origId);
+          arrGenres[i] = (it && it.genres && it.genres.length) ? it.genres.slice() : new Array(genreDim).fill(0);
+        }
+        deepModel.setInternalItemGenres(arrGenres);
+        // ensure userFeatArray attached
+        deepModel.userFeatArray = deepModel.userFeatArray || userFeat;
+      } else {
+        deepModel = null;
+      }
+
+      const pairs = buildPosPairs();
+      // shuffle pairs
+      for (let i=pairs.length-1;i>0;i--) {
+        const j = Math.floor(Math.random()*(i+1));
+        [pairs[i], pairs[j]] = [pairs[j], pairs[i]];
+      }
+
+      const optimizer = tf.train.adam(0.001);
+      const lossHistory = [];
+      plotLoss(lossHistory);
+
+      for (let e=0;e<epochs;e++) {
+        setProgress(`Epoch ${e+1}/${epochs}`);
+        let batchLossAccum = 0, batchCount=0;
+        for (let start=0; start<pairs.length; start += batchSize) {
+          const batch = pairs.slice(start, start+batchSize);
+          if (batch.length < 2) continue;
+          const uBatchArr = batch.map(p=>p[0]);
+          const posBatchArr = batch.map(p=>p[1]);
+
+          const lossVal = await twoTower.trainStepInBatch(uBatchArr, posBatchArr, optimizer, useBPR);
+          let dlLoss = 0;
+          if (deepModel) dlLoss = await deepModel.trainStep(uBatchArr, posBatchArr, optimizer, useBPR);
+
+          const combined = lossVal + (dlLoss || 0);
+          lossHistory.push(combined);
+          batchLossAccum += combined; batchCount++;
+
+          if (lossHistory.length % 10 === 0) plotLoss(lossHistory);
+
+          if (start % (batchSize*50) === 0) {
+            setStatus(`epoch ${e+1}/${epochs} - processed ${(start+batchSize)}/${pairs.length} pairs`);
+            await sleep(5);
+          }
+        }
+        setStatus(`finished epoch ${e+1}/${epochs} avgLoss=${(batchLossAccum/batchCount).toFixed(4)}`);
+      }
+
+      plotLoss(lossHistory);
+      setStatus('training complete — computing item projection...');
+
+      const sampleN = Math.min(1000, numItems);
+      const step = Math.max(1, Math.floor(numItems / sampleN));
+      const sampleIdxs = [];
+      for (let i=0;i<numItems;i+=step) sampleIdxs.push(i);
+
+      const itemEmbTensor = await twoTower.getItemEmbeddings(sampleIdxs);
+      const {proj} = await computePCA2D(itemEmbTensor);
+      const projArr = await proj.array();
+      itemEmbeddingSample2D = sampleIdxs.map((origIdx, i) => {
+        const origId = indexItem[origIdx];
+        const it = items.get(origId);
+        return {x: projArr[i][0], y: projArr[i][1], title: it ? it.title : String(origId), idx: origIdx};
+      });
+      drawProjection(itemEmbeddingSample2D);
+
+      setStatus('done. You can now Test a random user.');
+      btnTest.disabled = false; btnLoad.disabled = false; btnTrain.disabled = false;
+    } catch (err) {
+      console.error(err);
+      setStatus('training error: ' + String(err));
+      btnLoad.disabled = false; btnTrain.disabled = false; btnTest.disabled = true;
+    }
+  };
+
+  // Test handler
+  btnTest.onclick = async () => {
+    try {
+      btnTest.disabled = true; btnTrain.disabled = true; btnLoad.disabled = true;
+      setStatus('testing...');
+      const eligible = [];
+      for (const [u, arr] of usersMap) if (arr.length >= 20) eligible.push(u);
+      if (eligible.length === 0) { setStatus('no user with >=20 ratings'); return; }
+      const uIdx = eligible[Math.floor(Math.random()*eligible.length)];
+      const topHist = getUserTopRatedTitles(uIdx, 10);
+
+      const userEmb = await twoTower.getUserEmbedding(uIdx);
+      const scoresTensor = await twoTower.scoreAllItems(userEmb);
+      const scores = await scoresTensor.array();
+      const rated = new Set((usersMap.get(uIdx) || []).map(x=>x.itemIdx));
+      const pairs = scores.map((s,i)=>({i,s})).filter(p=>!rated.has(p.i));
+      pairs.sort((a,b)=>b.s - a.s);
+      const topRec = pairs.slice(0,10).map(p => {
+        const origId = indexItem[p.i];
+        const it = items.get(origId);
+        return {title: it ? it.title : String(origId), itemIdx: p.i};
+      });
+
+      let topRecDL = [];
+      if (deepModel) {
+        const userEmbDL = await deepModel.getUserEmbedding(uIdx);
+        const scoresDL = await deepModel.scoreAllItems(userEmbDL);
+        const sDL = await scoresDL.array();
+        const pairsDL = sDL.map((s,i)=>({i,s})).filter(p=>!rated.has(p.i));
+        pairsDL.sort((a,b)=>b.s - a.s);
+        topRecDL = pairsDL.slice(0,10).map(p => {
+          const origId = indexItem[p.i];
+          const it = items.get(origId);
+          return {title: it ? it.title : String(origId), itemIdx: p.i};
+        });
+      }
+
+      let html = '<div class="side-table"><div class="panel"><b>Top-10 Historically Rated</b><ol>';
+      for (const t of topHist) html += `<li>${escapeHtml(t.title)}</li>`;
+      html += '</ol></div>';
+
+      html += '<div class="panel"><b>Two-Tower Top-10 (no seen)</b><ol>';
+      for (const t of topRec) html += `<li>${escapeHtml(t.title)}</li>`;
+      html += '</ol></div>';
+
+      if (deepModel) {
+        html += '<div class="panel"><b>Deep (MLP) Top-10</b><ol>';
+        for (const t of topRecDL) html += `<li>${escapeHtml(t.title)}</li>`;
+        html += '</ol></div>';
+      }
+
+      html += '</div>';
+      tableArea.innerHTML = html;
+      setStatus('test complete');
+      btnTest.disabled = false; btnTrain.disabled = false; btnLoad.disabled = false;
+    } catch (err) {
+      console.error(err);
+      setStatus('test error: ' + String(err));
+      btnTest.disabled = false; btnTrain.disabled = false; btnLoad.disabled = false;
+    }
+  };
+
+  function escapeHtml(text) {
+    return (text+'').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
   }
-  itemEmb.dispose(); idxT.dispose(); mean.dispose(); centered.dispose();
-  statusEl.innerText = 'Projection drawn.';
-}
 
-function drawProjection(indices, coords){
-  const canvas = document.getElementById('proj-canvas');
-  const ctx = canvas.getContext('2d');
-  ctx.clearRect(0,0,canvas.width,canvas.height);
-  // normalize coords to canvas
-  const xs = coords.map(p=>p[0]); const ys = coords.map(p=>p[1]);
-  const minx = Math.min(...xs), maxx = Math.max(...xs);
-  const miny = Math.min(...ys), maxy = Math.max(...ys);
-  for (let i=0;i<coords.length;i++){
-    const x = 20 + ((coords[i][0]-minx)/(maxx-minx || 1))*(canvas.width-40);
-    const y = 20 + ((coords[i][1]-miny)/(maxy-miny || 1))*(canvas.height-40);
-    ctx.fillStyle = '#e50914';
-    ctx.beginPath(); ctx.arc(x,y,3,0,Math.PI*2); ctx.fill();
-    // hover not implemented here; for simplicity we don't add hover listeners on canvas
-  }
-  log(`Plotted ${coords.length} item embeddings.`);
-}
-
-// ----------- LOSS CHART (canvas simple plot) -------------
-function drawLossChart(){
-  const canvas = document.getElementById('loss-canvas');
-  const ctx = canvas.getContext('2d');
-  ctx.clearRect(0,0,canvas.width,canvas.height);
-  ctx.fillStyle='#0b0b0b'; ctx.fillRect(0,0,canvas.width,canvas.height);
-  if (lossHistory.length===0) return;
-  const padding = 30;
-  const w = canvas.width - 2*padding;
-  const h = canvas.height - 2*padding;
-  const xs = lossHistory.map((p,i)=> padding + (i/(lossHistory.length-1))*w);
-  const ysvals = lossHistory.map(p=>p.y);
-  const miny = Math.min(...ysvals), maxy = Math.max(...ysvals);
-  // draw axis
-  ctx.strokeStyle='#444'; ctx.beginPath(); ctx.moveTo(padding, padding); ctx.lineTo(padding, padding+h); ctx.lineTo(padding+w, padding+h); ctx.stroke();
-  // draw line
-  ctx.strokeStyle='#46d369'; ctx.lineWidth=2; ctx.beginPath();
-  for (let i=0;i<lossHistory.length;i++){
-    const x = xs[i];
-    const y = padding + h - ((lossHistory[i].y - miny)/(maxy-miny || 1))*h;
-    if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
-  }
-  ctx.stroke();
-  // draw last loss value
-  ctx.fillStyle='#ccc'; ctx.font='12px Arial';
-  ctx.fillText('Loss: ' + lossHistory[lossHistory.length-1].y.toFixed(4), padding+6, padding+12);
-}
-
-// ------------- Utilities -------------
-function escapeHtml(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-
+  setStatus('ready');
+})();
