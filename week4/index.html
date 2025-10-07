@@ -98,6 +98,19 @@
         .file-input {
             margin: 10px 0;
         }
+        .progress-bar {
+            width: 100%;
+            height: 20px;
+            background-color: #f8f9fa;
+            border-radius: 10px;
+            margin: 10px 0;
+            overflow: hidden;
+        }
+        .progress-fill {
+            height: 100%;
+            background-color: #007bff;
+            transition: width 0.3s ease;
+        }
     </style>
 </head>
 <body>
@@ -129,13 +142,17 @@
             <button id="testModel" disabled>Test Recommendation</button>
         </div>
         
+        <div class="progress-bar" id="trainingProgress" style="display: none;">
+            <div class="progress-fill" id="progressFill" style="width: 0%"></div>
+        </div>
+        
         <div class="info-box">
             <strong>Training Configuration:</strong><br>
             - Simple Model: Direct embedding lookup<br>
             - Deep Model: MLP with hidden layers + genre features<br>
             - Embedding Dimension: 32<br>
             - Training Epochs: 10<br>
-            - Batch Size: 512
+            - Batch Size: 256
         </div>
     </div>
 
@@ -206,7 +223,7 @@
             <li><strong>File Names:</strong> Expected: u.data and u.item (or adata and utkem)</li>
             <li><strong>Training:</strong> Trains two models - Simple (embedding only) and Deep Learning (MLP towers)</li>
             <li><strong>Training Time:</strong> Expect 2-5 minutes for 10 epochs in modern browsers</li>
-            <li><strong>Testing:</strong> Randomly selects a user with ≥20 ratings and shows recommendations</li>
+            <li><strong>Testing:</strong> Randomly selects a user with ≥10 ratings and shows recommendations</li>
         </ul>
     </div>
 
