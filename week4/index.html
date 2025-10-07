@@ -1,235 +1,96 @@
 <!-- index.html -->
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Movie Recommendation System - Two Tower Model</title>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 20px;
-            background-color: #f5f5f5;
-        }
-        .container {
-            background: white;
-            padding: 20px;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            margin-bottom: 20px;
-        }
-        .button-group {
-            margin: 20px 0;
-        }
-        button {
-            padding: 10px 20px;
-            margin: 5px;
-            border: none;
-            border-radius: 4px;
-            background-color: #007bff;
-            color: white;
-            cursor: pointer;
-            font-size: 14px;
-        }
-        button:hover {
-            background-color: #0056b3;
-        }
-        button:disabled {
-            background-color: #6c757d;
-            cursor: not-allowed;
-        }
-        .status {
-            padding: 10px;
-            margin: 10px 0;
-            border-radius: 4px;
-            background-color: #e9ecef;
-            white-space: pre-wrap;
-        }
-        .chart-container {
-            margin: 20px 0;
-        }
-        canvas {
-            border: 1px solid #ddd;
-            border-radius: 4px;
-        }
-        .comparison-table {
-            width: 100%;
-            border-collapse: collapse;
-            margin: 20px 0;
-        }
-        .comparison-table th, .comparison-table td {
-            border: 1px solid #ddd;
-            padding: 8px;
-            text-align: left;
-        }
-        .comparison-table th {
-            background-color: #f8f9fa;
-            font-weight: bold;
-        }
-        .table-container {
-            display: flex;
-            gap: 20px;
-            margin: 20px 0;
-        }
-        .table-section {
-            flex: 1;
-        }
-        .loading {
-            color: #007bff;
-        }
-        .success {
-            color: #28a745;
-        }
-        .error {
-            color: #dc3545;
-        }
-        .warning {
-            color: #ffc107;
-        }
-        .info-box {
-            background-color: #d1ecf1;
-            border: 1px solid #bee5eb;
-            border-radius: 4px;
-            padding: 15px;
-            margin: 20px 0;
-        }
-        .file-input {
-            margin: 10px 0;
-        }
-        .progress-bar {
-            width: 100%;
-            height: 20px;
-            background-color: #f8f9fa;
-            border-radius: 10px;
-            margin: 10px 0;
-            overflow: hidden;
-        }
-        .progress-fill {
-            height: 100%;
-            background-color: #007bff;
-            transition: width 0.3s ease;
-        }
-    </style>
+  <meta charset="utf-8" />
+  <title>Two-Tower Retrieval Demo — MovieLens 100K (TF.js)</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial; margin: 14px; color:#111 }
+    h1 { font-size: 20px; margin-bottom:6px }
+    .controls { margin-bottom:12px; }
+    button { margin-right:6px; padding:8px 12px; border-radius:6px; border:1px solid #ccc; background: #f7f7f7; cursor:pointer }
+    #status { display:inline-block; margin-left:12px; color:#333; vertical-align:middle }
+    #ui { display:flex; gap:18px; align-items:flex-start; }
+    #leftColumn { width:420px }
+    #rightColumn { flex:1; min-width:420px }
+    .panel { border:1px solid #eee; padding:10px; border-radius:8px; box-shadow: 0 1px 3px rgba(0,0,0,0.03); margin-bottom:12px; background:#fff }
+    canvas { display:block; width:100%; height:240px; border-radius:6px; background:#fafafa }
+    #lossCanvas { height:160px }
+    #projCanvas { height:420px }
+    table { width:100%; border-collapse:collapse }
+    td, th { padding:6px; border-bottom:1px solid #eee; vertical-align:top }
+    .side-table { display:flex; gap:8px }
+    .side-table > div { flex:1; min-width:160px }
+    #tooltip { position:fixed; background:#222; color:#fff; padding:6px 8px; border-radius:6px; pointer-events:none; font-size:12px; display:none }
+    .small { font-size:12px; color:#666 }
+    .hint { margin-top:8px; font-size:12px }
+  </style>
 </head>
 <body>
-    <h1>Movie Recommendation System - Two Tower Model</h1>
-    
-    <div class="container">
-        <h2>Data Loading</h2>
-        <div class="button-group">
-            <button id="loadData">Load Data from Files</button>
-            <button id="loadSampleData">Load Sample Data</button>
-        </div>
-        
-        <div class="file-input">
-            <label>Or upload your data files:</label><br>
-            <input type="file" id="uDataFile" accept=".data,.txt" style="margin: 5px 0;">
-            <input type="file" id="uItemFile" accept=".item,.txt" style="margin: 5px 0;">
-            <button id="uploadData">Upload and Load</button>
-        </div>
-        
-        <div id="status" class="status">
-            Ready to load data. Click "Load Data from Files" to load from data/ folder, or use sample data.
-        </div>
+  <h1>Two-Tower + Deep (MLP) Retrieval — MovieLens 100K (TF.js)</h1>
+
+  <div class="controls panel">
+    <button id="btnLoad">Load Data</button>
+    <button id="btnTrain" disabled>Train</button>
+    <button id="btnTest" disabled>Test</button>
+    <label class="small" style="margin-left:12px">
+      embeddingDim:
+      <input id="inputEmbDim" type="number" value="32" min="8" max="128" style="width:70px">
+    </label>
+    <label class="small" style="margin-left:8px">
+      epochs:
+      <input id="inputEpochs" type="number" value="5" min="1" max="50" style="width:60px">
+    </label>
+    <label class="small" style="margin-left:8px">
+      batch:
+      <input id="inputBatch" type="number" value="128" min="8" max="1024" style="width:60px">
+    </label>
+    <label class="small" style="margin-left:8px">
+      maxInteractions:
+      <input id="inputMaxInt" type="number" value="80000" min="1000" max="100000" style="width:90px">
+    </label>
+    <span id="status">idle</span>
+    <div class="hint">Tips: Place data files at <code>/data/u.data</code> and <code>/data/u.item</code>. Training in-browser may take a few minutes depending on device — use smaller epochs or embedding dims for faster runs. Works on GitHub Pages (static).</div>
+  </div>
+
+  <div id="ui">
+    <div id="leftColumn">
+      <div class="panel">
+        <h3>Training / Loss</h3>
+        <canvas id="lossCanvas" width="600" height="160"></canvas>
+        <div id="progress" class="small">Not started</div>
+      </div>
+
+      <div class="panel">
+        <h3>Embedding Projection (sampled items)</h3>
+        <canvas id="projCanvas" width="600" height="420"></canvas>
+      </div>
     </div>
 
-    <div class="container">
-        <h2>Model Training</h2>
-        <div class="button-group">
-            <button id="trainModel" disabled>Train Model</button>
-            <button id="testModel" disabled>Test Recommendation</button>
-        </div>
-        
-        <div class="progress-bar" id="trainingProgress" style="display: none;">
-            <div class="progress-fill" id="progressFill" style="width: 0%"></div>
-        </div>
-        
-        <div class="info-box">
-            <strong>Training Configuration:</strong><br>
-            - Simple Model: Direct embedding lookup<br>
-            - Deep Model: MLP with hidden layers + genre features<br>
-            - Embedding Dimension: 32<br>
-            - Training Epochs: 10<br>
-            - Batch Size: 256
-        </div>
-    </div>
+    <div id="rightColumn">
+      <div class="panel">
+        <h3>Results — Test (Side-by-side)</h3>
+        <div id="tableArea">Press <b>Test</b> after training to see comparison tables.</div>
+      </div>
 
-    <div class="container">
-        <h2>Training Progress</h2>
-        <div class="chart-container">
-            <canvas id="lossChart" width="800" height="400"></canvas>
-        </div>
+      <div class="panel">
+        <h3>Model Options</h3>
+        <label><input id="optBPR" type="checkbox"> Use BPR-style pairwise loss (otherwise in-batch softmax)</label><br>
+        <label><input id="optUseGenres" type="checkbox" checked> Use genres as item features for Deep model</label><br>
+        <label><input id="optUseUserFeat" type="checkbox" checked> Use synthesized user features for Deep model</label><br>
+        <label><input id="optIncludeDL" type="checkbox" checked> Train Deep (MLP) model in addition to Two-Tower</label><br>
+      </div>
     </div>
+  </div>
 
-    <div class="container">
-        <h2>Item Embeddings Visualization</h2>
-        <div class="chart-container">
-            <canvas id="embeddingChart" width="800" height="600"></canvas>
-        </div>
-    </div>
+  <div id="tooltip"></div>
 
-    <div class="container">
-        <h2>Recommendation Results</h2>
-        <div id="userInfo"></div>
-        <div class="table-container" id="resultsContainer" style="display: none;">
-            <div class="table-section">
-                <h3>Historical Top 10 Ratings</h3>
-                <table class="comparison-table" id="historicalTable">
-                    <thead>
-                        <tr>
-                            <th>Rank</th>
-                            <th>Movie Title</th>
-                            <th>Rating</th>
-                        </tr>
-                    </thead>
-                    <tbody></tbody>
-                </table>
-            </div>
-            <div class="table-section">
-                <h3>Simple Model Recommendations</h3>
-                <table class="comparison-table" id="simpleRecommendationsTable">
-                    <thead>
-                        <tr>
-                            <th>Rank</th>
-                            <th>Movie Title</th>
-                            <th>Score</th>
-                        </tr>
-                    </thead>
-                    <tbody></tbody>
-                </table>
-            </div>
-            <div class="table-section">
-                <h3>Deep Learning Recommendations</h3>
-                <table class="comparison-table" id="deepRecommendationsTable">
-                    <thead>
-                        <tr>
-                            <th>Rank</th>
-                            <th>Movie Title</th>
-                            <th>Score</th>
-                        </tr>
-                    </thead>
-                    <tbody></tbody>
-                </table>
-            </div>
-        </div>
-    </div>
+  <!-- Libraries -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.12.0/dist/tf.min.js"></script>
 
-    <div class="info-box">
-        <h3>Usage Tips:</h3>
-        <ul>
-            <li><strong>Data Loading:</strong> Try different methods if files aren't found</li>
-            <li><strong>File Names:</strong> Expected: u.data and u.item (or adata and utkem)</li>
-            <li><strong>Training:</strong> Trains two models - Simple (embedding only) and Deep Learning (MLP towers)</li>
-            <li><strong>Training Time:</strong> Expect 2-5 minutes for 10 epochs in modern browsers</li>
-            <li><strong>Testing:</strong> Randomly selects a user with ≥10 ratings and shows recommendations</li>
-        </ul>
-    </div>
-
-    <!-- Load TensorFlow.js -->
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.15.0/dist/tf.min.js"></script>
-    <script src="two-tower.js"></script>
-    <script src="app.js"></script>
+  <!-- App and model scripts -->
+  <script src="two-tower.js"></script>
+  <script src="app.js"></script>
 </body>
 </html>
