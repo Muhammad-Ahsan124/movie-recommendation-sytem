@@ -1,5 +1,5 @@
 // app.js
-// Main application logic: data loading, training loop, UI, plotting, PCA projection, and test rendering.
+// Main application logic with robust data-loading fallback (tries multiple relative paths and local file upload if hosted files are missing).
 // Depends on two-tower.js which exposes TwoTowerModel and DeepRecModel classes.
 
 (async () => {
@@ -13,6 +13,8 @@
   const progressDiv = document.getElementById('progress');
   const tableArea = document.getElementById('tableArea');
   const tooltip = document.getElementById('tooltip');
+  const fileUdata = document.getElementById('fileUdata');
+  const fileUitem = document.getElementById('fileUitem');
 
   const inputEmbDim = document.getElementById('inputEmbDim');
   const inputEpochs = document.getElementById('inputEpochs');
@@ -31,25 +33,24 @@
   // App state
   let interactions = []; // {userId, itemId, rating, ts}
   let items = new Map(); // itemId -> {title, year, genres: [0/1..]}
-  let usersMap = new Map(); // userId -> [interactions...]
+  let usersMap = new Map(); // internal userIdx -> [{itemIdx, rating, ts}]
   let userIndex = new Map(); // original userId -> 0-based idx
   let itemIndex = new Map(); // original itemId -> 0-based idx
-  let indexUser = []; // reverse
-  let indexItem = [];
+  let indexUser = []; // reverse: internal -> original id
+  let indexItem = []; // internal -> original item id
   let numUsers = 0, numItems = 0;
 
   let twoTower = null;
   let deepModel = null;
 
-  let itemEmbeddingSample2D = []; // for plotting: {x,y,title,idx}
+  let itemEmbeddingSample2D = []; // for plotting
 
-  // Helpers: update status
+  // Helpers
   function setStatus(s) { status.innerText = s; }
   function setProgress(s) { progressDiv.innerText = s; }
-
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-  // Simple canvas line plot (loss)
+  // Simple loss plot
   function plotLoss(lossHistory) {
     const ctx = lossCtx;
     const w = lossCanvas.width;
@@ -57,7 +58,6 @@
     ctx.clearRect(0, 0, w, h);
     ctx.fillStyle = '#fff';
     ctx.fillRect(0,0,w,h);
-
     if (lossHistory.length === 0) {
       ctx.fillStyle = '#666';
       ctx.fillText('No loss yet', 8, 20);
@@ -79,17 +79,13 @@
     ctx.fillText(`loss (min ${min.toFixed(4)} max ${max.toFixed(4)})`, 8, 12);
   }
 
-  // PCA via power iteration to get top-2 components (approx). Works on tf.Tensor2d (n x d).
+  // PCA approx (power iteration)
   async function computePCA2D(tensorX, iterations=30) {
     return tf.tidy(() => {
-      // center
       const mean = tensorX.mean(0);
-      let X = tensorX.sub(mean); // [n,d]
-      // covariance approx: C = X^T X / n
+      let X = tensorX.sub(mean);
       const n = X.shape[0];
-      const C = X.transpose().matMul(X).div(n); // [d,d]
-
-      // power iteration for first eigenvector
+      const C = X.transpose().matMul(X).div(n);
       function powerIter(Cmat) {
         let v = tf.randomNormal([Cmat.shape[1], 1]);
         for (let i=0;i<iterations;i++) {
@@ -101,22 +97,17 @@
         const eigenval = tf.squeeze(tf.matMul(tf.matMul(eigenvec.expandDims(0), Cmat), eigenvec.expandDims(1)));
         return {eigenvec, eigenval};
       }
-
       const {eigenvec: v1, eigenval: l1} = powerIter(C);
-      // deflate
       const v1col = v1.reshape([v1.shape[0],1]);
       const C2 = C.sub(v1col.matMul(v1col.transpose()).mul(l1));
-
       const {eigenvec: v2} = powerIter(C2);
-
-      // project X onto [v1, v2]
-      const P = tf.stack([v1, v2], 1); // [d,2]
-      const proj = X.matMul(P); // [n,2]
+      const P = tf.stack([v1, v2], 1);
+      const proj = X.matMul(P);
       return {proj, mean, pcs: P};
     });
   }
 
-  // Draw projection scatter and set up tooltip hover
+  // Draw projection scatter
   function drawProjection(points) {
     const ctx = projCtx;
     const W = projCanvas.width, H = projCanvas.height;
@@ -126,7 +117,6 @@
     if (!points || points.length===0) {
       ctx.fillStyle = '#666'; ctx.fillText('No projection', 16, 24); return;
     }
-    // scale to canvas
     const xs = points.map(p=>p.x), ys = points.map(p=>p.y);
     const minx = Math.min(...xs), maxx = Math.max(...xs);
     const miny = Math.min(...ys), maxy = Math.max(...ys);
@@ -135,13 +125,8 @@
       const cx = pad + ((p.x - minx)/(maxx - minx + 1e-9))*(W-2*pad);
       const cy = pad + ((p.y - miny)/(maxy - miny + 1e-9))*(H-2*pad);
       p.canvasX = cx; p.canvasY = cy;
-      // draw point
-      ctx.beginPath();
-      ctx.arc(cx, cy, 3, 0, Math.PI*2);
-      ctx.fillStyle = '#1565c0';
-      ctx.fill();
+      ctx.beginPath(); ctx.arc(cx, cy, 3, 0, Math.PI*2); ctx.fillStyle = '#1565c0'; ctx.fill();
     }
-    // hover handling
     projCanvas.onmousemove = (ev) => {
       const r = projCanvas.getBoundingClientRect();
       const mx = ev.clientX - r.left, my = ev.clientY - r.top;
@@ -155,30 +140,23 @@
         tooltip.style.left = (ev.clientX + 10) + 'px';
         tooltip.style.top = (ev.clientY + 10) + 'px';
         tooltip.innerText = `${nearest.title}`;
-      } else {
-        tooltip.style.display = 'none';
-      }
+      } else tooltip.style.display = 'none';
     };
     projCanvas.onmouseleave = () => tooltip.style.display = 'none';
   }
 
-  // Parse u.item: itemId|title|release_date|...|genreFlags(19)
+  // Parse functions
   function parseItemLine(line) {
-    // split by pipe - title can include parentheses but not pipes
     const parts = line.split('|');
-    if (parts.length < 6) return null;
+    if (parts.length < 2) return null;
     const id = parseInt(parts[0], 10);
     const rawTitle = parts[1];
-    // try to extract year from title like "Toy Story (1995)"
     let year = null;
     const m = rawTitle.match(/\((\d{4})\)$/);
     if (m) year = parseInt(m[1], 10);
-    // genres begin at index 5 onwards
     const genreFlags = parts.slice(5).map(x => parseInt(x || '0', 10));
     return {id, title: rawTitle, year, genres: genreFlags};
   }
-
-  // Parse u.data: userId \t itemId \t rating \t timestamp
   function parseDataLine(line) {
     const parts = line.trim().split('\t');
     if (parts.length < 4) return null;
@@ -190,10 +168,8 @@
     };
   }
 
-  // Build mappings and filtered interactions
+  // Build indexing and usersMap
   function buildIndexing(maxInteractions) {
-    // filter interactions by rating or timestamp if needed already done
-    // build unique sets
     const uSet = new Set(), iSet = new Set();
     const interactionsTrim = interactions.slice(0, maxInteractions);
     for (const it of interactionsTrim) { uSet.add(it.userId); iSet.add(it.itemId); }
@@ -203,23 +179,19 @@
     itemIndex = new Map(indexItem.map((v,i)=>[v,i]));
     numUsers = indexUser.length; numItems = indexItem.length;
 
-    // build usersMap: index -> list of {itemIdx, rating, ts}
     usersMap = new Map();
     for (const it of interactionsTrim) {
       const u0 = userIndex.get(it.userId);
       const i0 = itemIndex.get(it.itemId);
-      if (u0==null || i0==null) continue; // safety
+      if (u0==null || i0==null) continue;
       if (!usersMap.has(u0)) usersMap.set(u0, []);
       usersMap.get(u0).push({itemIdx: i0, rating: it.rating, ts: it.ts});
     }
-    // sort each user's interactions by recency desc
     for (const [u, arr] of usersMap) arr.sort((a,b)=>b.ts - a.ts);
   }
 
-  // Build ranked top-10 historically for a given internal user idx:
   function getUserTopRatedTitles(uIdx, limit=10) {
     const arr = usersMap.get(uIdx) || [];
-    // sort by rating desc then recency (ts desc)
     const copy = arr.slice().sort((a,b) => {
       if (b.rating !== a.rating) return b.rating - a.rating;
       return b.ts - a.ts;
@@ -232,7 +204,6 @@
     return top;
   }
 
-  // Create dataset batches as arrays of [userIdx, posItemIdx]
   function buildPosPairs() {
     const pairs = [];
     for (const [uIdx, arr] of usersMap) {
@@ -241,17 +212,81 @@
     return pairs;
   }
 
-  // ========== UI Actions ==========
+  // Read a File object as text (Promise)
+  function readFileAsText(file) {
+    return new Promise((res, rej) => {
+      const fr = new FileReader();
+      fr.onload = () => res(fr.result);
+      fr.onerror = (e) => rej(e);
+      fr.readAsText(file);
+    });
+  }
 
+  // Try fetch a list of candidate relative URLs for a single filename
+  async function tryFetchCandidates(candidates) {
+    for (const p of candidates) {
+      try {
+        const r = await fetch(p);
+        if (r.ok) {
+          const txt = await r.text();
+          return {path: p, text: txt};
+        }
+      } catch (e) {
+        // ignore and try next
+      }
+    }
+    return null;
+  }
+
+  // Unified loader that tries hosted paths, then falls back to uploaded files
+  async function loadDataFiles() {
+    setStatus('attempting to load data from known paths...');
+    const attempts = [];
+    // Candidate relative paths (cover common cases)
+    const dataCandidates = ['data/u.data', './data/u.data', 'data/u.data.txt', './data/u.data.txt', '/data/u.data'];
+    const itemCandidates = ['data/u.item', './data/u.item', 'data/u.item.txt', './data/u.item.txt', '/data/u.item'];
+
+    const [gotData, gotItem] = await Promise.all([
+      tryFetchCandidates(dataCandidates),
+      tryFetchCandidates(itemCandidates)
+    ]);
+
+    // accumulate attempted paths for user info
+    attempts.push({type:'u.data', tried: dataCandidates, found: gotData ? gotData.path : null});
+    attempts.push({type:'u.item', tried: itemCandidates, found: gotItem ? gotItem.path : null});
+
+    // If any missing, try uploaded files
+    let rawData = gotData ? gotData.text : null;
+    let rawItem = gotItem ? gotItem.text : null;
+
+    if (!rawData && fileUdata.files && fileUdata.files[0]) {
+      rawData = await readFileAsText(fileUdata.files[0]);
+      attempts.push({type:'u.data', tried:'local upload', found: fileUdata.files[0].name});
+    }
+    if (!rawItem && fileUitem.files && fileUitem.files[0]) {
+      rawItem = await readFileAsText(fileUitem.files[0]);
+      attempts.push({type:'u.item', tried:'local upload', found: fileUitem.files[0].name});
+    }
+
+    return {rawData, rawItem, attempts};
+  }
+
+  // UI: Load button handler
   btnLoad.onclick = async () => {
     setStatus('loading data...');
     try {
       const maxInt = parseInt(inputMaxInt.value,10) || 80000;
-      // fetch files
-      const [rawData, rawItem] = await Promise.all([
-        fetch('data/u.data').then(r => r.ok ? r.text() : Promise.reject('u.data not found')),
-        fetch('data/u.item').then(r => r.ok ? r.text() : Promise.reject('u.item not found'))
-      ]);
+      const {rawData, rawItem, attempts} = await loadDataFiles();
+      // Display info about attempts if something missing
+      if (!rawData || !rawItem) {
+        const msgParts = [];
+        if (!rawData) msgParts.push('u.data not found');
+        if (!rawItem) msgParts.push('u.item not found');
+        setStatus('error loading data: ' + msgParts.join(', ') + '. Use the file inputs to upload files or ensure /data/u.data and /data/u.item exist in your repo.');
+        console.warn('Load attempts:', attempts);
+        return;
+      }
+
       // parse items
       items.clear();
       rawItem.split('\n').forEach(line => {
@@ -260,6 +295,7 @@
         if (!parsed) return;
         items.set(parsed.id, {title: parsed.title, year: parsed.year, genres: parsed.genres});
       });
+
       // parse interactions
       interactions = [];
       rawData.split('\n').forEach(line => {
@@ -268,7 +304,6 @@
         if (!p) return;
         interactions.push(p);
       });
-      // sort interactions by timestamp (optionally)
       interactions.sort((a,b)=>a.ts - b.ts);
 
       buildIndexing(maxInt);
@@ -277,17 +312,17 @@
       btnTrain.disabled = false;
       btnTest.disabled = true;
     } catch (e) {
-      setStatus('error loading data: ' + String(e));
       console.error(e);
+      setStatus('error loading data: ' + String(e));
+      btnTrain.disabled = true;
+      btnTest.disabled = true;
     }
   };
 
-  // Training loop
+  // Training handler
   btnTrain.onclick = async () => {
     try {
-      btnTrain.disabled = true;
-      btnLoad.disabled = true;
-      btnTest.disabled = true;
+      btnTrain.disabled = true; btnLoad.disabled = true; btnTest.disabled = true;
       setStatus('initializing models...');
       const embDim = parseInt(inputEmbDim.value,10) || 32;
       const epochs = parseInt(inputEpochs.value,10) || 5;
@@ -298,14 +333,12 @@
       const useUserFeat = optUseUserFeat.checked;
       const includeDL = optIncludeDL.checked;
 
-      // rebuild indexing (in case user changed maxInteractions)
       buildIndexing(maxInt);
 
-      // create models
       twoTower = new TwoTowerModel(numUsers, numItems, embDim);
+
       if (includeDL) {
-        // synthesize simple user features: avg rating and count (normalized)
-        // Build a userFeatMatrix as Map userIdx -> [avgRating, countNorm]
+        // synthesize user features
         const userFeat = new Array(numUsers).fill(0).map(()=>[0,0]);
         for (let u=0; u<numUsers; u++) {
           const arr = usersMap.get(u) || [];
@@ -321,13 +354,24 @@
           itemMeta: items,
           userFeatArray: userFeat
         });
+
+        // Prepare internal item->genre mapping aligned to internal indices
+        const genreDim = (items.size>0) ? (Array.from(items.values())[0].genres ? Array.from(items.values())[0].genres.length : 0) : 0;
+        const arrGenres = new Array(numItems);
+        for (let i=0;i<numItems;i++) {
+          const origId = indexItem[i];
+          const it = items.get(origId);
+          arrGenres[i] = (it && it.genres && it.genres.length) ? it.genres.slice() : new Array(genreDim).fill(0);
+        }
+        deepModel.setInternalItemGenres(arrGenres);
+        // ensure userFeatArray attached
+        deepModel.userFeatArray = deepModel.userFeatArray || userFeat;
       } else {
         deepModel = null;
       }
 
-      // Prepare pairs
-      const pairs = buildPosPairs(); // [ [uIdx, itemIdx], ... ]
-      // shuffle
+      const pairs = buildPosPairs();
+      // shuffle pairs
       for (let i=pairs.length-1;i>0;i--) {
         const j = Math.floor(Math.random()*(i+1));
         [pairs[i], pairs[j]] = [pairs[j], pairs[i]];
@@ -337,24 +381,18 @@
       const lossHistory = [];
       plotLoss(lossHistory);
 
-      // Training loop: for each epoch, iterate batches
       for (let e=0;e<epochs;e++) {
         setProgress(`Epoch ${e+1}/${epochs}`);
         let batchLossAccum = 0, batchCount=0;
         for (let start=0; start<pairs.length; start += batchSize) {
           const batch = pairs.slice(start, start+batchSize);
           if (batch.length < 2) continue;
-          // build tensors
           const uBatchArr = batch.map(p=>p[0]);
           const posBatchArr = batch.map(p=>p[1]);
 
-          // Run two-tower training step
           const lossVal = await twoTower.trainStepInBatch(uBatchArr, posBatchArr, optimizer, useBPR);
-          // optionally train deep model (with same batch pairs)
           let dlLoss = 0;
-          if (deepModel) {
-            dlLoss = await deepModel.trainStep(uBatchArr, posBatchArr, optimizer, useBPR);
-          }
+          if (deepModel) dlLoss = await deepModel.trainStep(uBatchArr, posBatchArr, optimizer, useBPR);
 
           const combined = lossVal + (dlLoss || 0);
           lossHistory.push(combined);
@@ -362,10 +400,9 @@
 
           if (lossHistory.length % 10 === 0) plotLoss(lossHistory);
 
-          // progress UI
           if (start % (batchSize*50) === 0) {
             setStatus(`epoch ${e+1}/${epochs} - processed ${(start+batchSize)}/${pairs.length} pairs`);
-            await sleep(5); // yield to UI
+            await sleep(5);
           }
         }
         setStatus(`finished epoch ${e+1}/${epochs} avgLoss=${(batchLossAccum/batchCount).toFixed(4)}`);
@@ -373,13 +410,13 @@
 
       plotLoss(lossHistory);
       setStatus('training complete — computing item projection...');
-      // compute item embeddings (sample up to 1000)
+
       const sampleN = Math.min(1000, numItems);
       const step = Math.max(1, Math.floor(numItems / sampleN));
       const sampleIdxs = [];
       for (let i=0;i<numItems;i+=step) sampleIdxs.push(i);
-      const itemEmbTensor = await twoTower.getItemEmbeddings(sampleIdxs); // [n,d]
-      // PCA
+
+      const itemEmbTensor = await twoTower.getItemEmbeddings(sampleIdxs);
       const {proj} = await computePCA2D(itemEmbTensor);
       const projArr = await proj.array();
       itemEmbeddingSample2D = sampleIdxs.map((origIdx, i) => {
@@ -390,34 +427,28 @@
       drawProjection(itemEmbeddingSample2D);
 
       setStatus('done. You can now Test a random user.');
-      btnTest.disabled = false;
-      btnLoad.disabled = false;
+      btnTest.disabled = false; btnLoad.disabled = false; btnTrain.disabled = false;
     } catch (err) {
       console.error(err);
       setStatus('training error: ' + String(err));
-      btnLoad.disabled = false;
-      btnTrain.disabled = false;
-      btnTest.disabled = true;
+      btnLoad.disabled = false; btnTrain.disabled = false; btnTest.disabled = true;
     }
   };
 
-  // Test: pick random user with >= 20 ratings
+  // Test handler
   btnTest.onclick = async () => {
     try {
       btnTest.disabled = true; btnTrain.disabled = true; btnLoad.disabled = true;
       setStatus('testing...');
-      // find eligible users
       const eligible = [];
       for (const [u, arr] of usersMap) if (arr.length >= 20) eligible.push(u);
       if (eligible.length === 0) { setStatus('no user with >=20 ratings'); return; }
       const uIdx = eligible[Math.floor(Math.random()*eligible.length)];
       const topHist = getUserTopRatedTitles(uIdx, 10);
 
-      // compute recommendations from two-tower
-      const userEmb = await twoTower.getUserEmbedding(uIdx); // tf.Tensor1d
+      const userEmb = await twoTower.getUserEmbedding(uIdx);
       const scoresTensor = await twoTower.scoreAllItems(userEmb);
       const scores = await scoresTensor.array();
-      // mask items the user already rated
       const rated = new Set((usersMap.get(uIdx) || []).map(x=>x.itemIdx));
       const pairs = scores.map((s,i)=>({i,s})).filter(p=>!rated.has(p.i));
       pairs.sort((a,b)=>b.s - a.s);
@@ -427,7 +458,6 @@
         return {title: it ? it.title : String(origId), itemIdx: p.i};
       });
 
-      // Deep model recommendations if available
       let topRecDL = [];
       if (deepModel) {
         const userEmbDL = await deepModel.getUserEmbedding(uIdx);
@@ -442,7 +472,6 @@
         });
       }
 
-      // render side-by-side table: left historical; middle two-tower rec; right deep rec (if available)
       let html = '<div class="side-table"><div class="panel"><b>Top-10 Historically Rated</b><ol>';
       for (const t of topHist) html += `<li>${escapeHtml(t.title)}</li>`;
       html += '</ol></div>';
@@ -468,12 +497,9 @@
     }
   };
 
-  // Escape HTML utility
   function escapeHtml(text) {
     return (text+'').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
   }
 
-  // ========== initialization ==========
   setStatus('ready');
-
 })();
