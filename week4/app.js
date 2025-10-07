@@ -22,11 +22,13 @@ class MovieRecommendationApp {
         this.currentEpoch = 0;
         
         this.initEventListeners();
-        this.updateStatus('Ready to load data...', 'status');
+        this.updateStatus('Ready to load data. Choose a loading method above.', 'status');
     }
 
     initEventListeners() {
-        document.getElementById('loadData').addEventListener('click', () => this.loadData());
+        document.getElementById('loadData').addEventListener('click', () => this.loadDataFromFiles());
+        document.getElementById('loadSampleData').addEventListener('click', () => this.loadSampleData());
+        document.getElementById('uploadData').addEventListener('click', () => this.loadFromUpload());
         document.getElementById('trainModel').addEventListener('click', () => this.trainModel());
         document.getElementById('testModel').addEventListener('click', () => this.testModel());
     }
@@ -37,19 +39,96 @@ class MovieRecommendationApp {
         statusEl.className = `status ${className}`;
     }
 
-    async loadData() {
+    async tryMultiplePaths() {
+        const paths = [
+            'data/u.data',
+            'data/adata',
+            './data/u.data',
+            './data/adata',
+            'u.data',
+            'adata'
+        ];
+        
+        for (const path of paths) {
+            try {
+                const response = await fetch(path);
+                if (response.ok) {
+                    return { path, data: await response.text() };
+                }
+            } catch (error) {
+                console.log(`Failed to load from ${path}:`, error.message);
+            }
+        }
+        return null;
+    }
+
+    async loadDataFromFiles() {
         try {
-            this.updateStatus('Loading data...', 'loading');
+            this.updateStatus('Searching for data files...', 'loading');
             
-            // Load interactions data
-            const interactionsResponse = await fetch('data/u.data');
-            if (!interactionsResponse.ok) throw new Error('Failed to load u.data');
-            const interactionsText = await interactionsResponse.text();
+            // Try multiple possible file paths and names
+            const interactionsResult = await this.tryMultiplePaths();
+            if (!interactionsResult) {
+                throw new Error('Could not find u.data or adata file. Tried: data/u.data, data/adata, ./data/u.data, ./data/adata, u.data, adata');
+            }
+
+            // Try to find items file
+            const itemsPaths = [
+                'data/u.item',
+                'data/utkem', 
+                './data/u.item',
+                './data/utkem',
+                'u.item',
+                'utkem'
+            ];
             
-            // Load items data
-            const itemsResponse = await fetch('data/u.item');
-            if (!itemsResponse.ok) throw new Error('Failed to load u.item');
-            const itemsText = await itemsResponse.text();
+            let itemsResult = null;
+            for (const path of itemsPaths) {
+                try {
+                    const response = await fetch(path);
+                    if (response.ok) {
+                        itemsResult = { path, data: await response.text() };
+                        break;
+                    }
+                } catch (error) {
+                    continue;
+                }
+            }
+
+            if (!itemsResult) {
+                throw new Error('Could not find u.item or utkem file. Tried: data/u.item, data/utkem, ./data/u.item, ./data/utkem, u.item, utkem');
+            }
+
+            this.updateStatus(`Found files: ${interactionsResult.path} and ${itemsResult.path}\nParsing data...`, 'loading');
+            
+            this.parseInteractions(interactionsResult.data);
+            this.parseItems(itemsResult.data);
+            this.buildUserItemMappings();
+            this.calculateUserTopRated();
+            
+            this.isDataLoaded = true;
+            document.getElementById('trainModel').disabled = false;
+            this.updateStatus(`Data loaded successfully!\n- Users: ${this.users.size}\n- Items: ${this.items.size}\n- Interactions: ${this.interactions.length}\n- Files: ${interactionsResult.path}, ${itemsResult.path}`, 'success');
+            
+        } catch (error) {
+            this.updateStatus(`Error: ${error.message}\n\nTry using "Load Sample Data" or upload files manually.`, 'error');
+            console.error('Data loading error:', error);
+        }
+    }
+
+    async loadFromUpload() {
+        try {
+            const uDataFile = document.getElementById('uDataFile').files[0];
+            const uItemFile = document.getElementById('uItemFile').files[0];
+            
+            if (!uDataFile || !uItemFile) {
+                throw new Error('Please select both u.data and u.item files');
+            }
+            
+            this.updateStatus('Reading uploaded files...', 'loading');
+            
+            const interactionsText = await this.readFileAsText(uDataFile);
+            const itemsText = await this.readFileAsText(uItemFile);
             
             this.parseInteractions(interactionsText);
             this.parseItems(itemsText);
@@ -58,46 +137,165 @@ class MovieRecommendationApp {
             
             this.isDataLoaded = true;
             document.getElementById('trainModel').disabled = false;
-            this.updateStatus(`Data loaded successfully! Users: ${this.users.size}, Items: ${this.items.size}, Interactions: ${this.interactions.length}`, 'success');
+            this.updateStatus(`Data loaded successfully from uploaded files!\n- Users: ${this.users.size}\n- Items: ${this.items.size}\n- Interactions: ${this.interactions.length}`, 'success');
             
         } catch (error) {
-            this.updateStatus(`Error loading data: ${error.message}`, 'error');
-            console.error('Data loading error:', error);
+            this.updateStatus(`Upload error: ${error.message}`, 'error');
+            console.error('Upload error:', error);
+        }
+    }
+
+    readFileAsText(file) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = e => resolve(e.target.result);
+            reader.onerror = reject;
+            reader.readAsText(file);
+        });
+    }
+
+    loadSampleData() {
+        try {
+            this.updateStatus('Generating sample MovieLens-like data...', 'loading');
+            
+            // Create sample data structure
+            this.generateSampleData();
+            this.buildUserItemMappings();
+            this.calculateUserTopRated();
+            
+            this.isDataLoaded = true;
+            document.getElementById('trainModel').disabled = false;
+            this.updateStatus(`Sample data generated successfully!\n- Users: ${this.users.size}\n- Items: ${this.items.size}\n- Interactions: ${this.interactions.length}\nUsing synthetic data for demonstration.`, 'success');
+            
+        } catch (error) {
+            this.updateStatus(`Sample data error: ${error.message}`, 'error');
+            console.error('Sample data error:', error);
+        }
+    }
+
+    generateSampleData() {
+        // Generate sample movies
+        const sampleMovies = [
+            { id: 1, title: "Toy Story", year: 1995 },
+            { id: 2, title: "Jumanji", year: 1995 },
+            { id: 3, title: "Grumpier Old Men", year: 1995 },
+            { id: 4, title: "Waiting to Exhale", year: 1995 },
+            { id: 5, title: "Father of the Bride Part II", year: 1995 },
+            { id: 6, title: "Heat", year: 1995 },
+            { id: 7, title: "Sabrina", year: 1995 },
+            { id: 8, title: "Tom and Huck", year: 1995 },
+            { id: 9, title: "Sudden Death", year: 1995 },
+            { id: 10, title: "GoldenEye", year: 1995 }
+        ];
+
+        // Create items map
+        this.items.clear();
+        sampleMovies.forEach(movie => {
+            this.items.set(movie.id, {
+                title: movie.title,
+                year: movie.year,
+                genres: new Array(19).fill(0).map(() => Math.random() > 0.7 ? 1 : 0)
+            });
+        });
+
+        // Generate sample interactions
+        this.interactions = [];
+        for (let userId = 1; userId <= 50; userId++) {
+            const numRatings = Math.floor(Math.random() * 15) + 5; // 5-20 ratings per user
+            const ratedItems = new Set();
+            
+            for (let i = 0; i < numRatings; i++) {
+                let itemId;
+                do {
+                    itemId = Math.floor(Math.random() * sampleMovies.length) + 1;
+                } while (ratedItems.has(itemId));
+                
+                ratedItems.add(itemId);
+                
+                const rating = Math.floor(Math.random() * 4) + 1; // 1-5 rating
+                const timestamp = Date.now() - Math.floor(Math.random() * 1000000000);
+                
+                this.interactions.push({
+                    userId,
+                    itemId,
+                    rating,
+                    timestamp
+                });
+            }
         }
     }
 
     parseInteractions(data) {
         const lines = data.trim().split('\n');
-        this.interactions = lines.map(line => {
-            const [userId, itemId, rating, timestamp] = line.split('\t').map(x => parseInt(x));
-            return { userId, itemId, rating, timestamp };
-        });
+        this.interactions = lines.map((line, index) => {
+            try {
+                const parts = line.split(/\t|,/); // Support both tab and comma separation
+                if (parts.length >= 3) {
+                    const userId = parseInt(parts[0]);
+                    const itemId = parseInt(parts[1]);
+                    const rating = parseInt(parts[2]);
+                    const timestamp = parts[3] ? parseInt(parts[3]) : Date.now();
+                    
+                    if (isNaN(userId) || isNaN(itemId) || isNaN(rating)) {
+                        console.warn(`Skipping invalid line ${index}: ${line}`);
+                        return null;
+                    }
+                    
+                    return { userId, itemId, rating, timestamp };
+                }
+                return null;
+            } catch (error) {
+                console.warn(`Error parsing line ${index}: ${line}`, error);
+                return null;
+            }
+        }).filter(interaction => interaction !== null);
+        
+        console.log(`Parsed ${this.interactions.length} interactions`);
     }
 
     parseItems(data) {
         const lines = data.trim().split('\n');
-        lines.forEach(line => {
-            const parts = line.split('|');
-            if (parts.length >= 3) {
-                const itemId = parseInt(parts[0]);
-                const title = parts[1];
-                const releaseDate = parts[2];
+        this.items.clear();
+        
+        lines.forEach((line, index) => {
+            try {
+                // Try pipe separation first (original format), then fallback to tab
+                let parts = line.split('|');
+                if (parts.length < 3) {
+                    parts = line.split('\t');
+                }
                 
-                // Extract year from title (format: "Title (YYYY)")
-                const yearMatch = title.match(/\((\d{4})\)$/);
-                const year = yearMatch ? parseInt(yearMatch[1]) : null;
-                
-                // Parse genres (last 19 fields)
-                const genres = parts.slice(5, 24).map(x => parseInt(x));
-                
-                this.items.set(itemId, {
-                    title: title.replace(/\s*\(\d{4}\)$/, ''), // Remove year from title
-                    year,
-                    releaseDate,
-                    genres
-                });
+                if (parts.length >= 2) {
+                    const itemId = parseInt(parts[0]);
+                    if (isNaN(itemId)) {
+                        console.warn(`Skipping item with invalid ID on line ${index}: ${parts[0]}`);
+                        return;
+                    }
+                    
+                    const title = parts[1].trim();
+                    
+                    // Extract year from title (format: "Title (YYYY)")
+                    const yearMatch = title.match(/\((\d{4})\)$/);
+                    const year = yearMatch ? parseInt(yearMatch[1]) : null;
+                    
+                    // Parse genres if available (last 19 fields in original format)
+                    let genres = new Array(19).fill(0);
+                    if (parts.length >= 24) {
+                        genres = parts.slice(5, 24).map(x => parseInt(x) || 0);
+                    }
+                    
+                    this.items.set(itemId, {
+                        title: title.replace(/\s*\(\d{4}\)$/, ''), // Remove year from title
+                        year,
+                        genres
+                    });
+                }
+            } catch (error) {
+                console.warn(`Error parsing item line ${index}:`, error);
             }
         });
+        
+        console.log(`Parsed ${this.items.size} items`);
     }
 
     buildUserItemMappings() {
@@ -117,6 +315,7 @@ class MovieRecommendationApp {
         });
 
         // Build user ratings
+        this.userRatings.clear();
         this.interactions.forEach(interaction => {
             const userId = interaction.userId;
             if (!this.userRatings.has(userId)) {
@@ -131,6 +330,7 @@ class MovieRecommendationApp {
     }
 
     calculateUserTopRated() {
+        this.userTopRated.clear();
         for (const [userId, ratings] of this.userRatings.entries()) {
             // Sort by rating (descending), then by timestamp (descending for recent)
             const sorted = ratings.sort((a, b) => {
@@ -146,14 +346,15 @@ class MovieRecommendationApp {
         
         this.isTraining = true;
         document.getElementById('trainModel').disabled = true;
-        this.updateStatus('Starting model training...', 'loading');
+        document.getElementById('testModel').disabled = true;
+        this.updateStatus('Starting model training...\nThis may take 2-5 minutes depending on your browser.', 'loading');
         
         const config = {
             epochs: 10,
-            batchSize: 512,
+            batchSize: 256, // Reduced for stability
             embeddingDim: 32,
             learningRate: 0.001,
-            maxInteractions: 80000
+            maxInteractions: Math.min(50000, this.interactions.length) // Limit for performance
         };
 
         // Use subset of data if too large
@@ -202,6 +403,7 @@ class MovieRecommendationApp {
         for (let epoch = 0; epoch < config.epochs; epoch++) {
             this.currentEpoch = epoch;
             let epochLoss = 0;
+            let batchCount = 0;
             
             // Shuffle data
             const shuffledIndices = tf.util.createShuffledIndices(userIndices.length);
@@ -215,24 +417,43 @@ class MovieRecommendationApp {
                 const batchUsers = shuffledUsers.slice(start, end);
                 const batchItems = shuffledItems.slice(start, end);
                 
-                const loss = await model.trainStep(batchUsers, batchItems);
-                epochLoss += loss;
-                
-                // Update loss chart every few batches
-                if (batch % 10 === 0) {
-                    this.updateLossChart(modelType, loss, epoch * totalBatches + batch);
-                    await tf.nextFrame(); // Allow UI updates
+                try {
+                    const loss = await model.trainStep(batchUsers, batchItems);
+                    epochLoss += loss;
+                    batchCount++;
+                    
+                    // Update loss chart every few batches
+                    if (batch % 5 === 0) {
+                        this.updateLossChart(modelType, loss, epoch * totalBatches + batch);
+                        await tf.nextFrame(); // Allow UI updates
+                    }
+                    
+                    // Update status periodically
+                    if (batch % 20 === 0) {
+                        this.updateStatus(
+                            `Training ${modelType} model...\nEpoch ${epoch + 1}/${config.epochs}, Batch ${batch + 1}/${totalBatches}\nCurrent Loss: ${loss.toFixed(4)}`,
+                            'loading'
+                        );
+                    }
+                } catch (error) {
+                    console.error(`Training error in ${modelType} model, batch ${batch}:`, error);
                 }
             }
             
-            const avgLoss = epochLoss / totalBatches;
+            const avgLoss = batchCount > 0 ? epochLoss / batchCount : 0;
             this.lossHistory[modelType].push(avgLoss);
             console.log(`${modelType} Model - Epoch ${epoch + 1}/${config.epochs}, Loss: ${avgLoss.toFixed(4)}`);
             
             this.updateStatus(
-                `Training ${modelType} model... Epoch ${epoch + 1}/${config.epochs}, Loss: ${avgLoss.toFixed(4)}`,
+                `${modelType} model: Epoch ${epoch + 1}/${config.epochs} completed\nAverage Loss: ${avgLoss.toFixed(4)}`,
                 'loading'
             );
+            
+            // Force garbage collection
+            if (tf.memory().numTensors > 1000) {
+                tf.engine().startScope();
+                tf.engine().endScope();
+            }
         }
     }
 
@@ -256,94 +477,74 @@ class MovieRecommendationApp {
         ctx.font = '12px Arial';
         ctx.fillText('Loss', 10, canvas.height / 2);
         ctx.fillText('Batch', canvas.width / 2, canvas.height - 10);
+        ctx.fillText('Simple Model (blue)', canvas.width - 150, 30);
+        ctx.fillStyle = 'red';
+        ctx.fillText('Deep Model (red)', canvas.width - 150, 50);
     }
 
     updateLossChart(modelType, loss, batchIndex) {
         const canvas = document.getElementById('lossChart');
         const ctx = canvas.getContext('2d');
         
-        const x = 50 + (batchIndex % 100) * (canvas.width - 100) / 100;
-        const y = canvas.height - 50 - (loss * 100); // Scale loss for visibility
+        const x = 50 + (batchIndex % 200) * (canvas.width - 100) / 200;
+        const y = canvas.height - 50 - Math.min(loss * 50, canvas.height - 100); // Scale loss
         
         ctx.fillStyle = modelType === 'simple' ? 'blue' : 'red';
         ctx.beginPath();
         ctx.arc(x, y, 2, 0, 2 * Math.PI);
         ctx.fill();
-        
-        // Add legend
-        ctx.fillStyle = 'black';
-        ctx.font = '12px Arial';
-        ctx.fillText('Simple Model (blue)', canvas.width - 150, 30);
-        ctx.fillStyle = 'red';
-        ctx.fillText('Deep Model (red)', canvas.width - 150, 50);
     }
 
     async visualizeEmbeddings() {
-        // Use deep model for visualization
-        const itemEmbeddings = this.deepModel.getItemEmbeddings();
-        const sampleSize = Math.min(500, this.items.size);
-        
-        // Sample random items
-        const sampleIndices = [];
-        for (let i = 0; i < sampleSize; i++) {
-            sampleIndices.push(Math.floor(Math.random() * this.items.size));
+        try {
+            // Use deep model for visualization
+            const itemEmbeddings = this.deepModel.getItemEmbeddings();
+            const sampleSize = Math.min(200, this.items.size);
+            
+            // Sample random items
+            const sampleIndices = [];
+            for (let i = 0; i < sampleSize; i++) {
+                sampleIndices.push(Math.floor(Math.random() * this.items.size));
+            }
+            
+            const sampleEmbeddings = tf.gather(itemEmbeddings, sampleIndices);
+            const embeddings2D = await this.computePCA(sampleEmbeddings, 2);
+            
+            this.drawEmbeddingChart(embeddings2D, sampleIndices);
+            
+            // Clean up
+            sampleEmbeddings.dispose();
+        } catch (error) {
+            console.error('Error visualizing embeddings:', error);
         }
-        
-        const sampleEmbeddings = tf.gather(itemEmbeddings, sampleIndices);
-        const embeddings2D = await this.computePCA(sampleEmbeddings, 2);
-        
-        this.drawEmbeddingChart(embeddings2D, sampleIndices);
     }
 
     async computePCA(embeddings, components = 2) {
-        // Simple PCA implementation using power iteration
-        const embeddingArray = await embeddings.array();
-        const n = embeddingArray.length;
-        const dim = embeddingArray[0].length;
-        
-        // Center the data
-        const mean = new Array(dim).fill(0);
-        for (let i = 0; i < n; i++) {
-            for (let j = 0; j < dim; j++) {
-                mean[j] += embeddingArray[i][j];
-            }
-        }
-        for (let j = 0; j < dim; j++) {
-            mean[j] /= n;
-        }
-        
-        const centered = embeddingArray.map(row => 
-            row.map((val, j) => val - mean[j])
-        );
-        
-        // Compute covariance matrix
-        const covariance = new Array(dim).fill(0).map(() => new Array(dim).fill(0));
-        for (let i = 0; i < n; i++) {
-            for (let j = 0; j < dim; j++) {
-                for (let k = 0; k < dim; k++) {
-                    covariance[j][k] += centered[i][j] * centered[i][k];
+        return tf.tidy(() => {
+            const embeddingArray = embeddings.arraySync();
+            const n = embeddingArray.length;
+            const dim = embeddingArray[0].length;
+            
+            // Center the data
+            const mean = new Array(dim).fill(0);
+            for (let i = 0; i < n; i++) {
+                for (let j = 0; j < dim; j++) {
+                    mean[j] += embeddingArray[i][j];
                 }
             }
-        }
-        for (let j = 0; j < dim; j++) {
-            for (let k = 0; k < dim; k++) {
-                covariance[j][k] /= (n - 1);
+            for (let j = 0; j < dim; j++) {
+                mean[j] /= n;
             }
-        }
-        
-        // Simple power method for first two components
-        const projectTo2D = (data, vector1, vector2) => {
-            return data.map(row => [
-                row.reduce((sum, val, i) => sum + val * vector1[i], 0),
-                row.reduce((sum, val, i) => sum + val * vector2[i], 0)
-            ]);
-        };
-        
-        // Use first two dimensions as initial approximation
-        const pc1 = new Array(dim).fill(0).map((_, i) => i === 0 ? 1 : 0);
-        const pc2 = new Array(dim).fill(0).map((_, i) => i === 1 ? 1 : 0);
-        
-        return projectTo2D(centered, pc1, pc2);
+            
+            const centered = embeddingArray.map(row => 
+                row.map((val, j) => val - mean[j])
+            );
+            
+            // Simple projection using first two dimensions (approximation)
+            const projected = centered.map(row => [row[0], row[1]]);
+            
+            return projected;
+        });
     }
 
     drawEmbeddingChart(embeddings2D, indices) {
@@ -363,8 +564,8 @@ class MovieRecommendationApp {
         const yMax = Math.max(...yValues);
         
         // Scale to canvas
-        const scaleX = (x) => 50 + (x - xMin) * (canvas.width - 100) / (xMax - xMin);
-        const scaleY = (y) => canvas.height - 50 - (y - yMin) * (canvas.height - 100) / (yMax - yMin);
+        const scaleX = (x) => 50 + (x - xMin) * (canvas.width - 100) / (xMax - xMin || 1);
+        const scaleY = (y) => canvas.height - 50 - (y - yMin) * (canvas.height - 100) / (yMax - yMin || 1);
         
         // Draw points
         ctx.fillStyle = 'blue';
@@ -391,13 +592,13 @@ class MovieRecommendationApp {
 
         this.updateStatus('Generating recommendations...', 'loading');
 
-        // Find users with at least 20 ratings
+        // Find users with at least 10 ratings
         const qualifiedUsers = [...this.userRatings.entries()]
-            .filter(([_, ratings]) => ratings.length >= 20)
+            .filter(([_, ratings]) => ratings.length >= 10)
             .map(([userId]) => userId);
 
         if (qualifiedUsers.length === 0) {
-            this.updateStatus('No qualified users found (need users with ≥20 ratings)', 'error');
+            this.updateStatus('No qualified users found (need users with ≥10 ratings)', 'error');
             return;
         }
 
@@ -430,7 +631,7 @@ class MovieRecommendationApp {
         const historicalTable = document.getElementById('historicalTable').querySelector('tbody');
         historicalTable.innerHTML = '';
         
-        historicalRatings.forEach((rating, index) => {
+        historicalRatings.slice(0, 10).forEach((rating, index) => {
             const item = this.items.get(rating.itemId);
             const row = historicalTable.insertRow();
             row.insertCell(0).textContent = index + 1;
