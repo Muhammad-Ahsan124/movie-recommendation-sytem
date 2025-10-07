@@ -50,6 +50,22 @@
   function setProgress(s) { progressDiv.innerText = s; }
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+  // Clean up existing models to prevent variable name conflicts
+  function disposeModels() {
+    if (twoTower) {
+      twoTower.dispose();
+      twoTower = null;
+    }
+    if (deepModel) {
+      deepModel.dispose();
+      deepModel = null;
+    }
+    // Force garbage collection if available
+    if (tf.memory && typeof tf.memory === 'function') {
+      tf.memory();
+    }
+  }
+
   // Simple loss plot
   function plotLoss(lossHistory) {
     const ctx = lossCtx;
@@ -154,7 +170,7 @@
     let year = null;
     const m = rawTitle.match(/\((\d{4})\)$/);
     if (m) year = parseInt(m[1], 10);
-    const genreFlags = parts.slice(5).map(x => parseInt(x || '0', 10));
+    const genreFlags = parts.slice(5, 5+19).map(x => parseInt(x || '0', 10));
     return {id, title: rawTitle, year, genres: genreFlags};
   }
   function parseDataLine(line) {
@@ -171,7 +187,7 @@
   // Build indexing and usersMap
   function buildIndexing(maxInteractions) {
     const uSet = new Set(), iSet = new Set();
-    const interactionsTrim = interactions.slice(0, maxInteractions);
+    const interactionsTrim = maxInteractions ? interactions.slice(0, maxInteractions) : interactions;
     for (const it of interactionsTrim) { uSet.add(it.userId); iSet.add(it.itemId); }
     indexUser = Array.from(uSet).sort((a,b)=>a-b);
     indexItem = Array.from(iSet).sort((a,b)=>a-b);
@@ -324,6 +340,10 @@
     try {
       btnTrain.disabled = true; btnLoad.disabled = true; btnTest.disabled = true;
       setStatus('initializing models...');
+      
+      // Dispose existing models to prevent variable name conflicts
+      disposeModels();
+      
       const embDim = parseInt(inputEmbDim.value,10) || 32;
       const epochs = parseInt(inputEpochs.value,10) || 5;
       const batchSize = parseInt(inputBatch.value,10) || 128;
@@ -339,7 +359,7 @@
 
       if (includeDL) {
         // synthesize user features
-        const userFeat = new Array(numUsers).fill(0).map(()=>[0,0]);
+        const userFeat = new Array(numUsers);
         for (let u=0; u<numUsers; u++) {
           const arr = usersMap.get(u) || [];
           if (arr.length===0) userFeat[u] = [0,0];
@@ -348,24 +368,24 @@
             userFeat[u] = [avg/5.0, Math.log1p(arr.length)/Math.log(1+50)];
           }
         }
-        deepModel = new DeepRecModel({
-          numUsers, numItems, embDim,
-          useGenres, useUserFeat,
-          itemMeta: items,
-          userFeatArray: userFeat
-        });
 
         // Prepare internal item->genre mapping aligned to internal indices
-        const genreDim = (items.size>0) ? (Array.from(items.values())[0].genres ? Array.from(items.values())[0].genres.length : 0) : 0;
+        const genreDim = 19; // MovieLens has 19 fixed genres
         const arrGenres = new Array(numItems);
         for (let i=0;i<numItems;i++) {
           const origId = indexItem[i];
           const it = items.get(origId);
-          arrGenres[i] = (it && it.genres && it.genres.length) ? it.genres.slice() : new Array(genreDim).fill(0);
+          arrGenres[i] = (it && it.genres && it.genres.length === genreDim) ? 
+            it.genres.slice() : new Array(genreDim).fill(0);
         }
-        deepModel.setInternalItemGenres(arrGenres);
-        // ensure userFeatArray attached
-        deepModel.userFeatArray = deepModel.userFeatArray || userFeat;
+
+        deepModel = new DeepRecModel({
+          numUsers, numItems, embDim,
+          useGenres, useUserFeat,
+          userFeatArray: userFeat,
+          itemGenresArray: arrGenres,
+          genreDim: genreDim
+        });
       } else {
         deepModel = null;
       }
@@ -392,7 +412,9 @@
 
           const lossVal = await twoTower.trainStepInBatch(uBatchArr, posBatchArr, optimizer, useBPR);
           let dlLoss = 0;
-          if (deepModel) dlLoss = await deepModel.trainStep(uBatchArr, posBatchArr, optimizer, useBPR);
+          if (deepModel) {
+            dlLoss = await deepModel.trainStep(uBatchArr, posBatchArr, optimizer, useBPR);
+          }
 
           const combined = lossVal + (dlLoss || 0);
           lossHistory.push(combined);
