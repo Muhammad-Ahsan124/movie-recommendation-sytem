@@ -1,107 +1,57 @@
-<!-- index.html -->
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <title>Two-Tower Retrieval Demo — MovieLens 100K (TF.js)</title>
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial; margin: 14px; color:#111 }
-    h1 { font-size: 20px; margin-bottom:6px }
-    .controls { margin-bottom:12px; }
-    button { margin-right:6px; padding:8px 12px; border-radius:6px; border:1px solid #ccc; background: #f7f7f7; cursor:pointer }
-    #status { display:inline-block; margin-left:12px; color:#333; vertical-align:middle }
-    #ui { display:flex; gap:18px; align-items:flex-start; }
-    #leftColumn { width:420px }
-    #rightColumn { flex:1; min-width:420px }
-    .panel { border:1px solid #eee; padding:10px; border-radius:8px; box-shadow: 0 1px 3px rgba(0,0,0,0.03); margin-bottom:12px; background:#fff }
-    canvas { display:block; width:100%; height:240px; border-radius:6px; background:#fafafa }
-    #lossCanvas { height:160px }
-    #projCanvas { height:420px }
-    table { width:100%; border-collapse:collapse }
-    td, th { padding:6px; border-bottom:1px solid #eee; vertical-align:top }
-    .side-table { display:flex; gap:8px }
-    .side-table > div { flex:1; min-width:160px }
-    #tooltip { position:fixed; background:#222; color:#fff; padding:6px 8px; border-radius:6px; pointer-events:none; font-size:12px; display:none }
-    .small { font-size:12px; color:#666 }
-    .hint { margin-top:8px; font-size:12px }
-    .file-row { margin-top:8px; display:flex; gap:8px; align-items:center; }
-    .file-row label { font-size:13px; }
-    .notice { color:#a00; font-weight:600; margin-left:8px; }
-  </style>
+<meta charset="UTF-8">
+<title>Two-Tower + Deep (MLP) Retrieval — MovieLens 100K (TF.js)</title>
+<style>
+body { font-family: Arial, sans-serif; margin: 20px; }
+button { margin: 5px; padding: 8px 16px; }
+canvas { border: 1px solid #ccc; margin-top: 10px; }
+table { border-collapse: collapse; margin-top: 10px; }
+td, th { border: 1px solid #ccc; padding: 6px 10px; }
+</style>
 </head>
 <body>
-  <h1>Two-Tower + Deep (MLP) Retrieval — MovieLens 100K (TF.js)</h1>
+<h3>Two-Tower + Deep (MLP) Retrieval — MovieLens 100K (TF.js)</h3>
 
-  <div class="controls panel">
-    <button id="btnLoad">Load Data</button>
-    <button id="btnTrain" disabled>Train</button>
-    <button id="btnTest" disabled>Test</button>
-    <label class="small" style="margin-left:12px">
-      embeddingDim:
-      <input id="inputEmbDim" type="number" value="32" min="8" max="128" style="width:70px">
-    </label>
-    <label class="small" style="margin-left:8px">
-      epochs:
-      <input id="inputEpochs" type="number" value="5" min="1" max="50" style="width:60px">
-    </label>
-    <label class="small" style="margin-left:8px">
-      batch:
-      <input id="inputBatch" type="number" value="128" min="8" max="1024" style="width:60px">
-    </label>
-    <label class="small" style="margin-left:8px">
-      maxInteractions:
-      <input id="inputMaxInt" type="number" value="80000" min="1000" max="100000" style="width:90px">
-    </label>
-    <span id="status">idle</span>
+<div>
+  <button id="loadBtn">Load Data</button>
+  <button id="trainBtn">Train</button>
+  <button id="testBtn">Test</button>
+  embeddingDim: <input id="embDim" value="32" size="3">
+  epochs: <input id="epochs" value="5" size="3">
+  batch: <input id="batch" value="128" size="3">
+  maxInteractions: <input id="maxInt" value="80000" size="6">
+  <span id="status"></span>
+</div>
+<p>Tips: Place files under <code>/data/u.data</code> and <code>/data/u.item</code> — works with GitHub Pages.</p>
 
-    <div class="file-row">
-      <label>If hosting files are missing, upload them here:</label>
-      <input id="fileUdata" type="file" accept=".data,.txt" style="display:inline-block">
-      <input id="fileUitem" type="file" accept=".item,.txt" style="display:inline-block">
-      <span class="small">(optional)</span>
-    </div>
-
-    <div class="hint">Tips: Place data files at <code>/data/u.data</code> and <code>/data/u.item</code> in your repo. If GitHub Pages gives 404, use the upload inputs above to load files from your computer. Training in-browser may take a few minutes depending on device — use smaller epochs or embedding dims for faster runs. Works on GitHub Pages (static).</div>
+<div style="display:flex; flex-wrap:wrap;">
+  <div style="flex:1; min-width:300px;">
+    <h4>Training / Loss</h4>
+    <canvas id="lossChart" width="400" height="200"></canvas>
   </div>
-
-  <div id="ui">
-    <div id="leftColumn">
-      <div class="panel">
-        <h3>Training / Loss</h3>
-        <canvas id="lossCanvas" width="600" height="160"></canvas>
-        <div id="progress" class="small">Not started</div>
-      </div>
-
-      <div class="panel">
-        <h3>Embedding Projection (sampled items)</h3>
-        <canvas id="projCanvas" width="600" height="420"></canvas>
-      </div>
-    </div>
-
-    <div id="rightColumn">
-      <div class="panel">
-        <h3>Results — Test (Side-by-side)</h3>
-        <div id="tableArea">Press <b>Test</b> after training to see comparison tables.</div>
-      </div>
-
-      <div class="panel">
-        <h3>Model Options</h3>
-        <label><input id="optBPR" type="checkbox"> Use BPR-style pairwise loss (otherwise in-batch softmax)</label><br>
-        <label><input id="optUseGenres" type="checkbox" checked> Use genres as item features for Deep model</label><br>
-        <label><input id="optUseUserFeat" type="checkbox" checked> Use synthesized user features for Deep model</label><br>
-        <label><input id="optIncludeDL" type="checkbox" checked> Train Deep (MLP) model in addition to Two-Tower</label><br>
-      </div>
+  <div style="flex:1; min-width:300px;">
+    <h4>Results — Test (Side-by-side)</h4>
+    <p>Press Test after training to see comparison tables.</p>
+    <div>
+      <label><input type="checkbox" id="useBPR"> Use BPR loss</label><br>
+      <label><input type="checkbox" id="useGenres" checked> Use genres as item features (Deep)</label><br>
+      <label><input type="checkbox" id="useUserFeat" checked> Use synthesized user features (Deep)</label><br>
+      <label><input type="checkbox" id="useDeep" checked> Train Deep (MLP) model in addition to Two-Tower</label>
     </div>
   </div>
+</div>
 
-  <div id="tooltip"></div>
+<div>
+  <h4>Embedding Projection (sampled items)</h4>
+  <canvas id="projCanvas" width="600" height="400"></canvas>
+</div>
 
-  <!-- Libraries -->
-  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.12.0/dist/tf.min.js"></script>
+<div id="resultsTable"></div>
 
-  <!-- App and model scripts -->
-  <script src="two-tower.js"></script>
-  <script src="app.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0"></script>
+<script src="two-tower.js"></script>
+<script src="app.js"></script>
 </body>
 </html>
